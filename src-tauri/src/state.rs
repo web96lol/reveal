@@ -1,4 +1,4 @@
-use crate::{champ_select::handle_champ_select_start, AppConfig};
+use crate::{champ_select::handle_champ_select_start, post_game, AppConfig, ManagedPostGameState};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -53,6 +53,38 @@ pub async fn handle_client_state(
                         serde_json::json!({}),
                     )
                     .await;
+            }
+        }
+        "EndOfGame" => {
+            let cfg = app_handle.state::<AppConfig>();
+            let cfg = cfg.0.lock().await;
+            let should_process = cfg.auto_report_non_friends;
+            drop(cfg);
+
+            if should_process {
+                let post_game_state = app_handle.state::<ManagedPostGameState>();
+                let cloned_app_client = app_client.clone();
+                let cloned_remoting = remoting_client.clone();
+                let cloned_handle = app_handle.clone();
+
+                tauri::async_runtime::spawn(async move {
+                    match post_game::process_last_game(
+                        &post_game_state.0,
+                        &cloned_app_client,
+                        &cloned_remoting,
+                    )
+                    .await
+                    {
+                        Ok(summary) => {
+                            cloned_handle
+                                .emit_all("post_game_processed", summary)
+                                .unwrap();
+                        }
+                        Err(err) => {
+                            cloned_handle.emit_all("post_game_failed", err).unwrap();
+                        }
+                    }
+                });
             }
         }
         _ => {}

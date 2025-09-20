@@ -5,6 +5,7 @@ mod analytics;
 mod champ_select;
 mod commands;
 mod lobby;
+mod post_game;
 mod region;
 mod state;
 mod summoner;
@@ -16,10 +17,11 @@ use crate::region::RegionInfo;
 use crate::utils::display_champ_select;
 use commands::{
     app_ready, dodge, enable_dodge, get_config, get_lcu_info, get_lcu_state, open_opgg_link,
-    set_config,
+    process_last_game, set_config,
 };
 use futures_util::StreamExt;
 use lobby::Participant;
+use post_game::PostGameState;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use shaco::model::ws::LcuEvent;
@@ -47,6 +49,8 @@ pub struct DodgeState {
 
 struct AppConfig(Mutex<Config>);
 
+struct ManagedPostGameState(Mutex<PostGameState>);
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 struct Config {
@@ -55,6 +59,8 @@ struct Config {
     pub accept_delay: u32,
     #[serde(default = "default_provider")]
     pub multi_provider: String,
+    #[serde(default)]
+    pub auto_report_non_friends: bool,
 }
 
 fn default_provider() -> String {
@@ -85,6 +91,7 @@ fn main() {
                     auto_accept: false,
                     accept_delay: 2000,
                     multi_provider: "opgg".to_string(),
+                    auto_report_non_friends: false,
                 };
 
                 let cfg_json = serde_json::to_string(&cfg).unwrap();
@@ -94,6 +101,7 @@ fn main() {
             let cfg_json = std::fs::read_to_string(&cfg_path).unwrap();
             let cfg: Config = serde_json::from_str(&cfg_json).unwrap();
             app.manage(AppConfig(Mutex::new(cfg)));
+            app.manage(ManagedPostGameState(Mutex::new(PostGameState::default())));
 
             tauri::async_runtime::spawn(async move {
                 let mut connected = true;
@@ -179,7 +187,8 @@ fn main() {
             set_config,
             open_opgg_link,
             dodge,
-            enable_dodge
+            enable_dodge,
+            process_last_game
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
