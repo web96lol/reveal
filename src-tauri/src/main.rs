@@ -6,6 +6,7 @@ mod champ_select;
 mod commands;
 mod lobby;
 mod region;
+mod reports;
 mod state;
 mod summoner;
 mod utils;
@@ -45,6 +46,14 @@ pub struct DodgeState {
     pub enabled: Option<u64>,
 }
 
+struct ManagedReportState(Mutex<ReportState>);
+
+pub struct ReportState {
+    pub last_reported_game: Option<i64>,
+    pub pending_game: Option<i64>,
+    pub total_reports_sent: u32,
+}
+
 struct AppConfig(Mutex<Config>);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -53,6 +62,8 @@ struct Config {
     pub auto_open: bool,
     pub auto_accept: bool,
     pub accept_delay: u32,
+    #[serde(default)]
+    pub auto_report: bool,
     #[serde(default = "default_provider")]
     pub multi_provider: String,
 }
@@ -71,6 +82,11 @@ fn main() {
             last_dodge: None,
             enabled: None,
         })))
+        .manage(ManagedReportState(Mutex::new(ReportState {
+            last_reported_game: None,
+            pending_game: None,
+            total_reports_sent: 0,
+        })))
         .setup(|app| {
             let app_handle = app.handle();
             let cfg_folder = app.path_resolver().app_config_dir().unwrap();
@@ -84,6 +100,7 @@ fn main() {
                     auto_open: true,
                     auto_accept: false,
                     accept_delay: 2000,
+                    auto_report: false,
                     multi_provider: "opgg".to_string(),
                 };
 
