@@ -40,7 +40,7 @@
   ];
 </script>
 
-<div class="flex flex-col gap-2">
+<div class="flex flex-col gap-2 relative">
   <div class="flex gap-5 items-center">
     <div>
       <Label for="favoriteFruit">Multi Website</Label>
@@ -182,4 +182,16 @@
       Waiting for Champ Select...
     </div>
   {/if}
+  <div class="absolute right-4 bottom-4 flex items-center space-x-2">
+    <Switch
+      checked={config?.autoReport}
+      id="auto-report"
+      onCheckedChange={(v) => {
+        if (!config) return;
+        config.autoReport = v;
+        updateConfig(config);
+      }}
+    />
+    <Label for="auto-report">Auto-report teammates after game</Label>
+  </div>
 </div>
