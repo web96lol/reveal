@@ -1,5 +1,4 @@
 use crate::{Config, ManagedEndOfGameState};
-use reqwest::StatusCode;
 use serde::Serialize;
 use shaco::rest::RESTClient;
 use std::collections::HashSet;
@@ -153,6 +152,10 @@ async fn handle_player(
         .to_string();
 
     let Some(summoner_id) = parse_id(player.get("summonerId")) else {
+        println!(
+            "{} ({}) has no summoner id, skipping",
+            summoner_name, champion_name
+        );
         return Some(ReportOutcome {
             summoner_name,
             champion_name,
@@ -162,6 +165,10 @@ async fn handle_player(
     };
 
     if local_player_id == Some(summoner_id) {
+        println!(
+            "{} ({}) is the current account, ignoring",
+            summoner_name, champion_name
+        );
         return Some(ReportOutcome {
             summoner_name,
             champion_name,
@@ -171,6 +178,10 @@ async fn handle_player(
     }
 
     if friends.contains(&summoner_id) {
+        println!(
+            "{} ({}) is a friend, ignoring",
+            summoner_name, champion_name
+        );
         return Some(ReportOutcome {
             summoner_name,
             champion_name,
@@ -180,6 +191,10 @@ async fn handle_player(
     }
 
     let Some(puuid) = player.get("puuid").and_then(|v| v.as_str()) else {
+        println!(
+            "{} ({}) has no PUUID, skipping",
+            summoner_name, champion_name
+        );
         return Some(ReportOutcome {
             summoner_name,
             champion_name,
@@ -195,31 +210,35 @@ async fn handle_player(
         offender_puuid: puuid.to_string(),
     };
 
-    match remoting_client
-        .post_status(
+    let res = remoting_client
+        .post(
             "/lol-player-report-sender/v1/end-of-game-reports".to_string(),
             &payload,
         )
-        .await
-    {
-        Ok(status) if status == StatusCode::NO_CONTENT => Some(ReportOutcome {
-            summoner_name,
-            champion_name,
-            status: "reported".to_string(),
-            message: None,
-        }),
-        Ok(status) => Some(ReportOutcome {
-            summoner_name,
-            champion_name,
-            status: "failed".to_string(),
-            message: Some(format!("Unexpected status: {status}")),
-        }),
-        Err(err) => Some(ReportOutcome {
-            summoner_name,
-            champion_name,
-            status: "failed".to_string(),
-            message: Some(format!("Request error: {err}")),
-        }),
+        .await;
+
+    match res {
+        Ok(_) => {
+            println!("{} ({}) has been reported", summoner_name, champion_name);
+            Some(ReportOutcome {
+                summoner_name,
+                champion_name,
+                status: "reported".to_string(),
+                message: None,
+            })
+        }
+        Err(err) => {
+            println!(
+                "Failed to report {} ({}): {}",
+                summoner_name, champion_name, err
+            );
+            Some(ReportOutcome {
+                summoner_name,
+                champion_name,
+                status: "failed".to_string(),
+                message: Some(format!("Request error: {err}")),
+            })
+        }
     }
 }
 
