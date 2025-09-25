@@ -57,7 +57,6 @@ pub async fn handle_client_state(
         }
         "PreEndOfGame" | "EndOfGame" => {
             let cloned_app_handle = app_handle.clone();
-            let cloned_app_client = app_client.clone();
             let cloned_remoting = remoting_client.clone();
 
             tauri::async_runtime::spawn(async move {
@@ -66,13 +65,7 @@ pub async fn handle_client_state(
                 let cfg_state = cloned_app_handle.state::<AppConfig>();
                 let config = cfg_state.0.lock().await.clone();
 
-                handle_end_of_game(
-                    &cloned_remoting,
-                    &cloned_app_client,
-                    &config,
-                    &cloned_app_handle,
-                )
-                .await;
+                handle_end_of_game(&cloned_remoting, &config, &cloned_app_handle).await;
             });
         }
         _ => {}

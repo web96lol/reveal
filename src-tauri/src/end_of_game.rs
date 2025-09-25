@@ -1,4 +1,5 @@
 use crate::{Config, ManagedEndOfGameState};
+use reqwest::StatusCode;
 use serde::Serialize;
 use shaco::rest::RESTClient;
 use std::collections::HashSet;
@@ -41,7 +42,6 @@ struct ReportPayload {
 
 pub async fn handle_end_of_game(
     remoting_client: &RESTClient,
-    app_client: &RESTClient,
     config: &Config,
     app_handle: &AppHandle,
 ) {
@@ -78,7 +78,7 @@ pub async fn handle_end_of_game(
         .get("localPlayer")
         .and_then(|lp| parse_id(lp.get("summonerId")));
 
-    let friend_ids = load_friend_ids(app_client).await;
+    let friend_ids = load_friend_ids(remoting_client).await;
 
     let mut outcomes = Vec::new();
 
@@ -211,20 +211,32 @@ async fn handle_player(
     };
 
     let res = remoting_client
-        .post(
+        .post_status(
             "/lol-player-report-sender/v1/end-of-game-reports".to_string(),
             &payload,
         )
         .await;
 
     match res {
-        Ok(_) => {
+        Ok(status) if status == StatusCode::NO_CONTENT || status.is_success() => {
             println!("{} ({}) has been reported", summoner_name, champion_name);
             Some(ReportOutcome {
                 summoner_name,
                 champion_name,
                 status: "reported".to_string(),
                 message: None,
+            })
+        }
+        Ok(status) => {
+            println!(
+                "Failed to report {} ({}): status {}",
+                summoner_name, champion_name, status
+            );
+            Some(ReportOutcome {
+                summoner_name,
+                champion_name,
+                status: "failed".to_string(),
+                message: Some(format!("Unexpected status: {status}")),
             })
         }
         Err(err) => {
