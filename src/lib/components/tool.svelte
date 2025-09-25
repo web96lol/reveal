@@ -4,6 +4,7 @@
   import { fade } from "svelte/transition";
   import RevealCount from "./reveal-count.svelte";
   import type { ChampSelect } from "$lib/champ_select";
+  import type { EndOfGameSummary } from "$lib/end_of_game";
   import { Switch } from "./ui/switch";
   import { Label } from "./ui/label";
   import { Button } from "./ui/button";
@@ -13,6 +14,7 @@
   export let state = "Unknown";
   export let champSelect: ChampSelect | null = null;
   export let connected = false;
+  export let endOfGameSummary: EndOfGameSummary | null = null;
 
   let lastSecondDodgeEnabled = false;
   $: if (state !== "ChampSelect" && lastSecondDodgeEnabled) {
@@ -93,6 +95,18 @@
         />
         <Label for="auto-accept">Auto Accept</Label>
       </div>
+      <div class="flex items-center space-x-2">
+        <Switch
+          checked={config?.autoReport}
+          id="auto-report"
+          onCheckedChange={(v) => {
+            if (!config) return;
+            config.autoReport = v;
+            updateConfig(config);
+          }}
+        />
+        <Label for="auto-report">Auto Report</Label>
+      </div>
     </div>
   </div>
   <div class="grid grid-cols-2 text-sm">
@@ -107,6 +121,35 @@
       </div>
     </div>
   </div>
+  {#if endOfGameSummary}
+    <div class="border rounded-md p-2 text-xs flex flex-col gap-2">
+      <div class="font-medium text-sm">Last Auto Reports</div>
+      {#if endOfGameSummary.outcomes.length === 0}
+        <div class="text-muted-foreground">No players required reporting.</div>
+      {:else}
+        {#each endOfGameSummary.outcomes as outcome}
+          <div class="flex flex-col gap-1">
+            <div class="flex justify-between gap-2">
+              <span>{outcome.summonerName} ({outcome.championName})</span>
+              <span
+                class="capitalize"
+                class:text-green-600={outcome.status === "reported"}
+                class:text-amber-600={outcome.status === "skipped"}
+                class:text-red-600={outcome.status === "failed"}
+              >
+                {outcome.status}
+              </span>
+            </div>
+            {#if outcome.message}
+              <div class="text-[10px] text-muted-foreground">
+                {outcome.message}
+              </div>
+            {/if}
+          </div>
+        {/each}
+      {/if}
+    </div>
+  {/if}
   {#if state === "ChampSelect"}
     <div in:fade class="flex flex-col gap-5 w-full">
       {#if champSelect}
