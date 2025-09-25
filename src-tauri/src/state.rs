@@ -1,4 +1,4 @@
-use crate::{champ_select::handle_champ_select_start, AppConfig};
+use crate::{champ_select::handle_champ_select_start, reports::try_auto_report, AppConfig};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -54,6 +54,9 @@ pub async fn handle_client_state(
                     )
                     .await;
             }
+        }
+        "WaitingForStats" | "PreEndOfGame" | "EndOfGame" => {
+            try_auto_report(app_handle, app_client).await;
         }
         _ => {}
     }
