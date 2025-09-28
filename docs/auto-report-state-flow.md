@@ -29,7 +29,7 @@ The lock lives only for the scope where the configuration is needed. Once the gu
 
 * **Champ Select:** clone the `AppHandle` and REST clients, spawn a task, sleep five seconds, then lock `AppConfig` to drive `handle_champ_select_start`. This mirrors the original auto-open implementation.
 * **Ready Check:** lock `AppConfig`, check `auto_accept`, and, if enabled, delay for `accept_delay - 1000` before posting to the accept endpoint—unchanged from the pre-auto-report code.
-* **Post-game phases:** clone the handles, spawn a task, and lock `AppConfig` once inside to read `auto_report` and submit reports. The new branch matches the structure used by champ select.
+* **Post-game phases:** read and clone the config before spawning a background task. The task reuses that snapshot to attempt the end-of-game workflow up to ten times (with two-second gaps) until the stats endpoint becomes available, mirroring the persistence of the legacy C# loop without holding the mutex across awaits.
 
 Because each branch only holds the lock while reading config (and clones the data when longer-lived ownership is required), there is no risk of the mutex being held across awaits that would deadlock other tasks. The spawned post-game task, for example, clones the `Config` so that report submission does not need to keep the mutex guard alive.
 

@@ -4,9 +4,9 @@
 mod analytics;
 mod champ_select;
 mod commands;
+mod end_of_game;
 mod lobby;
 mod region;
-mod end_of_game;
 mod state;
 mod summoner;
 mod utils;

@@ -52,24 +52,28 @@ pub async fn handle_end_of_game_phase(
     app_handle: &AppHandle,
     app_client: &RESTClient,
     config: &Config,
-) {
+) -> bool {
     if !config.auto_report {
-        return;
+        return true;
     }
 
     let Some(stats) = fetch_eog_stats(app_client).await else {
-        return;
+        return false;
     };
 
     if !mark_game_if_new(app_handle, stats.game_id).await {
         println!("Post game already handled for {}", stats.game_id);
-        return;
+        return true;
     }
 
-    let friend_ids = fetch_friend_ids(app_client).await.unwrap_or_default();
+    let game_id = stats.game_id;
     let my_id = stats.local_player.summoner_id;
+    let teams = stats.teams;
 
-    for team in stats.teams {
+    let friend_ids = fetch_friend_ids(app_client).await.unwrap_or_default();
+    let mut reported_count = 0u32;
+
+    for team in teams {
         for player in team.players {
             if player.summoner_id == my_id {
                 println!(
@@ -96,7 +100,7 @@ pub async fn handle_end_of_game_phase(
             }
 
             let body = serde_json::json!({
-                "gameId": stats.game_id,
+                "gameId": game_id,
                 "categories": REPORT_CATEGORIES,
                 "offenderSummonerId": player.summoner_id,
                 "offenderPuuid": player.puuid,
@@ -109,11 +113,7 @@ pub async fn handle_end_of_game_phase(
                 )
                 .await
             {
-                println!(
-                    "Unable to auto report {}: {:?}",
-                    player.summoner_name,
-                    err
-                );
+                println!("Unable to auto report {}: {:?}", player.summoner_name, err);
                 continue;
             }
 
@@ -125,8 +125,16 @@ pub async fn handle_end_of_game_phase(
                     .as_deref()
                     .unwrap_or("Unknown Champion"),
             );
+            reported_count += 1;
         }
     }
+
+    println!(
+        "Auto-report session complete for game {} — reported {} players",
+        game_id, reported_count
+    );
+
+    true
 }
 
 async fn fetch_eog_stats(app_client: &RESTClient) -> Option<EogStatsBlock> {
