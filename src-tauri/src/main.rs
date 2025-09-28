@@ -6,7 +6,7 @@ mod champ_select;
 mod commands;
 mod lobby;
 mod region;
-mod reports;
+mod end_of_game;
 mod state;
 mod summoner;
 mod utils;
@@ -46,10 +46,10 @@ pub struct DodgeState {
     pub enabled: Option<u64>,
 }
 
-struct ManagedReportState(Mutex<ReportState>);
+struct ManagedPostGameState(Mutex<PostGameState>);
 
-pub struct ReportState {
-    pub last_reported_game: Option<u64>,
+pub struct PostGameState {
+    pub last_handled_game: Option<u64>,
 }
 
 struct AppConfig(Mutex<Config>);
@@ -80,8 +80,8 @@ fn main() {
             last_dodge: None,
             enabled: None,
         })))
-        .manage(ManagedReportState(Mutex::new(ReportState {
-            last_reported_game: None,
+        .manage(ManagedPostGameState(Mutex::new(PostGameState {
+            last_handled_game: None,
         })))
         .setup(|app| {
             let app_handle = app.handle();

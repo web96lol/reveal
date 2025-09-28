@@ -1,4 +1,8 @@
-use crate::{champ_select::handle_champ_select_start, reports::try_auto_report, AppConfig};
+use crate::{
+    champ_select::handle_champ_select_start,
+    end_of_game::handle_end_of_game_phase,
+    AppConfig,
+};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -43,10 +47,10 @@ pub async fn handle_client_state(
             let cfg = app_handle.state::<AppConfig>();
             let cfg = cfg.0.lock().await;
             if cfg.auto_accept {
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    (cfg.accept_delay as u64) - 1000,
-                ))
-                .await;
+                let delay = cfg
+                    .accept_delay
+                    .saturating_sub(1000);
+                tokio::time::sleep(std::time::Duration::from_millis(delay as u64)).await;
                 let _resp = remoting_client
                     .post(
                         "/lol-matchmaking/v1/ready-check/accept".to_string(),
@@ -56,7 +60,14 @@ pub async fn handle_client_state(
             }
         }
         "WaitingForStats" | "PreEndOfGame" | "EndOfGame" => {
-            try_auto_report(app_handle, app_client).await;
+            let cloned_handle = app_handle.clone();
+            let cloned_client = app_client.clone();
+
+            tauri::async_runtime::spawn(async move {
+                let cfg_state = cloned_handle.state::<AppConfig>();
+                let cfg = cfg_state.0.lock().await.clone();
+                handle_end_of_game_phase(&cloned_handle, &cloned_client, &cfg).await;
+            });
         }
         _ => {}
     }
