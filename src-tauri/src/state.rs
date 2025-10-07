@@ -1,4 +1,4 @@
-use crate::{champ_select::handle_champ_select_start, AppConfig};
+use crate::{champ_select::handle_champ_select_start, end_game, AppConfig};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -53,6 +53,14 @@ pub async fn handle_client_state(
                         serde_json::json!({}),
                     )
                     .await;
+            }
+        }
+        "PreEndOfGame" | "EndOfGame" => {
+            let cfg = app_handle.state::<AppConfig>();
+            let enabled = cfg.0.lock().await.auto_report;
+            if enabled {
+                let reporter = app_handle.state::<end_game::ManagedEndGameState>();
+                end_game::handle_end_of_game(&*reporter, app_client).await;
             }
         }
         _ => {}

@@ -4,6 +4,7 @@
 mod analytics;
 mod champ_select;
 mod commands;
+mod end_game;
 mod lobby;
 mod region;
 mod state;
@@ -11,6 +12,7 @@ mod summoner;
 mod utils;
 
 use crate::champ_select::ChampSelectSession;
+use crate::end_game::ManagedEndGameState;
 use crate::lobby::Lobby;
 use crate::region::RegionInfo;
 use crate::utils::display_champ_select;
@@ -55,6 +57,8 @@ struct Config {
     pub accept_delay: u32,
     #[serde(default = "default_provider")]
     pub multi_provider: String,
+    #[serde(default)]
+    pub auto_report: bool,
 }
 
 fn default_provider() -> String {
@@ -71,6 +75,7 @@ fn main() {
             last_dodge: None,
             enabled: None,
         })))
+        .manage(ManagedEndGameState::default())
         .setup(|app| {
             let app_handle = app.handle();
             let cfg_folder = app.path_resolver().app_config_dir().unwrap();
@@ -85,6 +90,7 @@ fn main() {
                     auto_accept: false,
                     accept_delay: 2000,
                     multi_provider: "opgg".to_string(),
+                    auto_report: false,
                 };
 
                 let cfg_json = serde_json::to_string(&cfg).unwrap();
@@ -105,6 +111,10 @@ fn main() {
                             println!("Waiting for League Client to open...");
                             connected = false;
                             app_handle.emit_all("lcu_state_update", false).unwrap();
+
+                            let reporter_state = app_handle.state::<ManagedEndGameState>();
+                            let mut reporter = reporter_state.0.lock().await;
+                            reporter.reset();
                         }
 
                         tokio::time::sleep(Duration::from_secs(2)).await;
