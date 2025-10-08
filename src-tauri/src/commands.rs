@@ -1,6 +1,6 @@
 use crate::{
-    champ_select::ChampSelectSession, lobby::get_lobby_info, region::RegionInfo,
-    utils::display_champ_select, AppConfig, Config, ManagedDodgeState, LCU,
+    champ_select::ChampSelectSession, lobby::get_lobby_info, post_game, region::RegionInfo,
+    utils::display_champ_select, AppConfig, Config, ManagedDodgeState, ManagedPostGameState, LCU,
 };
 use shaco::rest::{LCUClientInfo, RESTClient};
 use tauri::{AppHandle, Manager};
@@ -130,4 +130,31 @@ pub async fn enable_dodge(app_handle: AppHandle) -> Result<(), ()> {
 
     dodge_state.enabled = Some(champ_select.game_id);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn process_last_game(
+    app_handle: AppHandle,
+) -> Result<post_game::PostGameSummary, String> {
+    let lcu_state = app_handle.state::<LCU>();
+    let lcu_state = lcu_state.0.lock().await;
+
+    if !lcu_state.connected {
+        return Err("League Client is not connected".to_string());
+    }
+
+    let lcu_info = lcu_state
+        .data
+        .clone()
+        .ok_or_else(|| "LCU connection not initialized".to_string())?;
+    drop(lcu_state);
+
+    let app_client = RESTClient::new(lcu_info.clone(), false)
+        .map_err(|err| format!("Failed to create app client: {:?}", err))?;
+    let remoting_client = RESTClient::new(lcu_info, true)
+        .map_err(|err| format!("Failed to create remoting client: {:?}", err))?;
+
+    let post_game_state = app_handle.state::<ManagedPostGameState>();
+
+    post_game::process_last_game(&post_game_state.0, &app_client, &remoting_client).await
 }
