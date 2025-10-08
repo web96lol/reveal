@@ -1,4 +1,6 @@
-use crate::{champ_select::handle_champ_select_start, AppConfig};
+use crate::{
+    champ_select::handle_champ_select_start, end_of_game::handle_end_of_game_phase, AppConfig,
+};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -43,16 +45,48 @@ pub async fn handle_client_state(
             let cfg = app_handle.state::<AppConfig>();
             let cfg = cfg.0.lock().await;
             if cfg.auto_accept {
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    (cfg.accept_delay as u64) - 1000,
-                ))
-                .await;
+                let delay = cfg.accept_delay.saturating_sub(1000);
+                tokio::time::sleep(std::time::Duration::from_millis(delay as u64)).await;
                 let _resp = remoting_client
                     .post(
                         "/lol-matchmaking/v1/ready-check/accept".to_string(),
                         serde_json::json!({}),
                     )
                     .await;
+            }
+        }
+        "WaitingForStats" | "PreEndOfGame" | "EndOfGame" => {
+            let cfg_state = app_handle.state::<AppConfig>();
+            let config = cfg_state.0.lock().await.clone();
+
+            if config.auto_report {
+                let cloned_handle = app_handle.clone();
+                let cloned_client = app_client.clone();
+
+                tauri::async_runtime::spawn(async move {
+                    let mut succeeded = false;
+
+                    for attempt in 1..=10 {
+                        if handle_end_of_game_phase(&cloned_handle, &cloned_client, &config).await {
+                            if attempt > 1 {
+                                println!(
+                                    "Auto-report finished after {} attempts during post game phase",
+                                    attempt
+                                );
+                            }
+                            succeeded = true;
+                            break;
+                        }
+
+                        if attempt < 10 {
+                            tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+                        }
+                    }
+
+                    if !succeeded {
+                        println!("Auto-report failed to gather end of game stats after retries");
+                    }
+                });
             }
         }
         _ => {}

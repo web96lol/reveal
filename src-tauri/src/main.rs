@@ -4,6 +4,7 @@
 mod analytics;
 mod champ_select;
 mod commands;
+mod end_of_game;
 mod lobby;
 mod region;
 mod state;
@@ -45,6 +46,12 @@ pub struct DodgeState {
     pub enabled: Option<u64>,
 }
 
+struct ManagedPostGameState(Mutex<PostGameState>);
+
+pub struct PostGameState {
+    pub last_handled_game: Option<u64>,
+}
+
 struct AppConfig(Mutex<Config>);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -55,6 +62,8 @@ struct Config {
     pub accept_delay: u32,
     #[serde(default = "default_provider")]
     pub multi_provider: String,
+    #[serde(default)]
+    pub auto_report: bool,
 }
 
 fn default_provider() -> String {
@@ -71,6 +80,9 @@ fn main() {
             last_dodge: None,
             enabled: None,
         })))
+        .manage(ManagedPostGameState(Mutex::new(PostGameState {
+            last_handled_game: None,
+        })))
         .setup(|app| {
             let app_handle = app.handle();
             let cfg_folder = app.path_resolver().app_config_dir().unwrap();
@@ -85,6 +97,7 @@ fn main() {
                     auto_accept: false,
                     accept_delay: 2000,
                     multi_provider: "opgg".to_string(),
+                    auto_report: false,
                 };
 
                 let cfg_json = serde_json::to_string(&cfg).unwrap();
