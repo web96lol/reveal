@@ -5,6 +5,7 @@
   import { type Config } from "$lib/config";
   import "@fontsource-variable/inter";
   import type { ChampSelect } from "$lib/champ_select";
+  import type { EndOfGameSummary } from "$lib/end_of_game";
   import Tool from "$lib/components/tool.svelte";
   import Navbar from "$lib/components/navbar.svelte";
   import Footer from "$lib/components/footer.svelte";
@@ -15,6 +16,7 @@
   let connected = false;
   let champSelect: ChampSelect | null = null;
   let config: Config | null = null;
+  let endOfGameSummary: EndOfGameSummary | null = null;
   let updateStatus: "Checking" | "Installing" | "Restarting" | "UpToDate" =
     "Checking";
 
@@ -34,6 +36,10 @@
 
     await listen<ChampSelect>("champ_select_started", (event) => {
       champSelect = event.payload;
+    });
+
+    await listen<EndOfGameSummary>("end_of_game_processed", (event) => {
+      endOfGameSummary = event.payload;
     });
 
     invoke<Config>("app_ready").then((c) => {
@@ -71,7 +77,13 @@
     {:else if updateStatus === "Restarting"}
       <div>Restarting...</div>
     {:else if updateStatus === "UpToDate"}
-      <Tool {config} {state} {champSelect} {connected} />
+      <Tool
+        {config}
+        {state}
+        {champSelect}
+        {connected}
+        {endOfGameSummary}
+      />
     {/if}
   </div>
   <Footer {connected} />
