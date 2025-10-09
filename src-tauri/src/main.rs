@@ -4,6 +4,7 @@
 mod analytics;
 mod champ_select;
 mod commands;
+mod end_of_game;
 mod lobby;
 mod region;
 mod state;
@@ -11,6 +12,7 @@ mod summoner;
 mod utils;
 
 use crate::champ_select::ChampSelectSession;
+use crate::end_of_game::{ManagedReportState, ReportState};
 use crate::lobby::Lobby;
 use crate::region::RegionInfo;
 use crate::utils::display_champ_select;
@@ -55,10 +57,24 @@ struct Config {
     pub accept_delay: u32,
     #[serde(default = "default_provider")]
     pub multi_provider: String,
+    #[serde(default)]
+    pub auto_report: bool,
 }
 
 fn default_provider() -> String {
     "opgg".to_string()
+}
+
+pub(crate) fn default_report_categories() -> Vec<String> {
+    vec![
+        "NEGATIVE_ATTITUDE".to_string(),
+        "VERBAL_ABUSE".to_string(),
+        "LEAVING_AFK".to_string(),
+        "ASSISTING_ENEMY_TEAM".to_string(),
+        "HATE_SPEECH".to_string(),
+        "THIRD_PARTY_TOOLS".to_string(),
+        "INAPPROPRIATE_NAME".to_string(),
+    ]
 }
 
 fn main() {
@@ -71,6 +87,7 @@ fn main() {
             last_dodge: None,
             enabled: None,
         })))
+        .manage(ManagedReportState(Mutex::new(ReportState::default())))
         .setup(|app| {
             let app_handle = app.handle();
             let cfg_folder = app.path_resolver().app_config_dir().unwrap();
@@ -85,6 +102,7 @@ fn main() {
                     auto_accept: false,
                     accept_delay: 2000,
                     multi_provider: "opgg".to_string(),
+                    auto_report: false,
                 };
 
                 let cfg_json = serde_json::to_string(&cfg).unwrap();

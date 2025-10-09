@@ -1,4 +1,6 @@
-use crate::{champ_select::handle_champ_select_start, AppConfig};
+use crate::{
+    champ_select::handle_champ_select_start, end_of_game::handle_end_of_game_phase, AppConfig,
+};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -53,6 +55,30 @@ pub async fn handle_client_state(
                         serde_json::json!({}),
                     )
                     .await;
+            }
+        }
+        "PreEndOfGame" | "EndOfGame" => {
+            let cfg = app_handle.state::<AppConfig>();
+            let auto_report = {
+                let cfg = cfg.0.lock().await;
+                cfg.auto_report
+            };
+
+            if auto_report {
+                let cloned_app_handle = app_handle.clone();
+                let cloned_app_client = app_client.clone();
+                let cloned_remoting = remoting_client.clone();
+
+                tauri::async_runtime::spawn(async move {
+                    handle_end_of_game_phase(
+                        &cloned_app_client,
+                        &cloned_remoting,
+                        &cloned_app_handle,
+                    )
+                    .await;
+                });
+            } else {
+                println!("Auto report disabled; skipping end-of-game handler");
             }
         }
         _ => {}

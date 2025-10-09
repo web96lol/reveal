@@ -4,6 +4,7 @@
   import { fade } from "svelte/transition";
   import RevealCount from "./reveal-count.svelte";
   import type { ChampSelect } from "$lib/champ_select";
+  import type { EndOfGame } from "$lib/end_of_game";
   import { Switch } from "./ui/switch";
   import { Label } from "./ui/label";
   import { Button } from "./ui/button";
@@ -13,6 +14,7 @@
   export let state = "Unknown";
   export let champSelect: ChampSelect | null = null;
   export let connected = false;
+  export let endOfGame: EndOfGame | null = null;
 
   let lastSecondDodgeEnabled = false;
   $: if (state !== "ChampSelect" && lastSecondDodgeEnabled) {
@@ -93,6 +95,18 @@
         />
         <Label for="auto-accept">Auto Accept</Label>
       </div>
+      <div class="flex items-center space-x-2">
+        <Switch
+          checked={config?.autoReport}
+          id="auto-report"
+          onCheckedChange={(v) => {
+            if (!config) return;
+            config.autoReport = v;
+            updateConfig(config);
+          }}
+        />
+        <Label for="auto-report">Auto Report (End of Game)</Label>
+      </div>
     </div>
   </div>
   <div class="grid grid-cols-2 text-sm">
@@ -148,6 +162,36 @@
         >
           Open Multi Link
         </Button>
+      {/if}
+    </div>
+  {:else if state === "PreEndOfGame" || state === "EndOfGame"}
+    <div in:fade class="flex flex-col gap-3 w-full">
+      {#if !(config?.autoReport)}
+        <div class="border rounded-md p-2 text-xs bg-primary-foreground">
+          Auto report is disabled. Enable it to send reports at the end of each game.
+        </div>
+      {:else if endOfGame}
+        <div class="border rounded-md p-3 text-xs flex flex-col gap-2 bg-primary-foreground">
+          <div class="font-medium">
+            Auto report summary (Game {endOfGame.gameId})
+          </div>
+          <div class="flex justify-between">
+            <span>Players reported</span>
+            <span class="font-medium text-emerald-500">
+              {endOfGame.reportedCount}
+            </span>
+          </div>
+          <div class="flex justify-between">
+            <span>Players skipped</span>
+            <span class="font-medium text-muted-foreground">
+              {endOfGame.skippedCount}
+            </span>
+          </div>
+        </div>
+      {:else}
+        <div class="flex gap-2 items-center text-xs animate-pulse">
+          Gathering end-of-game data...
+        </div>
       {/if}
     </div>
   {:else if state === "InProgress"}
