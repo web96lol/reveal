@@ -82,21 +82,35 @@ pub async fn handle_end_of_game(
 
     let mut outcomes = Vec::new();
 
-    if let Some(teams) = eog_value.get("teams").and_then(|v| v.as_array()) {
-        for team in teams {
-            if let Some(players) = team.get("players").and_then(|v| v.as_array()) {
-                for player in players {
-                    if let Some(outcome) = handle_player(
-                        remoting_client,
-                        player,
-                        game_id,
-                        local_player_id,
-                        &friend_ids,
-                    )
-                    .await
+    if let (Some(teams), Some(local_id)) = (
+        eog_value.get("teams").and_then(|v| v.as_array()),
+        local_player_id,
+    ) {
+        if let Some(players) = teams.iter().find_map(|team| {
+            team.get("players")
+                .and_then(|v| v.as_array())
+                .and_then(|players| {
+                    if players
+                        .iter()
+                        .any(|player| parse_id(player.get("summonerId")) == Some(local_id))
                     {
-                        outcomes.push(outcome);
+                        Some(players)
+                    } else {
+                        None
                     }
+                })
+        }) {
+            for player in players {
+                if let Some(outcome) = handle_player(
+                    remoting_client,
+                    player,
+                    game_id,
+                    local_player_id,
+                    &friend_ids,
+                )
+                .await
+                {
+                    outcomes.push(outcome);
                 }
             }
         }
