@@ -4,6 +4,7 @@
   import { fade } from "svelte/transition";
   import RevealCount from "./reveal-count.svelte";
   import type { ChampSelect } from "$lib/champ_select";
+  import type { EndOfGameReport, ReportOutcomeStatus } from "$lib/end_of_game";
   import { Switch } from "./ui/switch";
   import { Label } from "./ui/label";
   import { Button } from "./ui/button";
@@ -13,12 +14,27 @@
   export let state = "Unknown";
   export let champSelect: ChampSelect | null = null;
   export let connected = false;
+  export let endOfGameReport: EndOfGameReport | null = null;
 
   let lastSecondDodgeEnabled = false;
   $: if (state !== "ChampSelect" && lastSecondDodgeEnabled) {
     // lobby is prob dodged or started, can reset state now
     lastSecondDodgeEnabled = false;
   }
+
+  const statusLabels: Record<ReportOutcomeStatus, string> = {
+    reported: "Reported",
+    skippedFriend: "Skipped (friend)",
+    skippedSelf: "Skipped (self)",
+    failed: "Failed",
+  };
+
+  const statusClasses: Record<ReportOutcomeStatus, string> = {
+    reported: "text-emerald-500",
+    skippedFriend: "text-muted-foreground",
+    skippedSelf: "text-muted-foreground",
+    failed: "text-destructive",
+  };
 
   const multiProviders = [
     {
@@ -93,6 +109,18 @@
         />
         <Label for="auto-accept">Auto Accept</Label>
       </div>
+      <div class="flex items-center space-x-2">
+        <Switch
+          checked={config?.autoReport}
+          id="auto-report"
+          onCheckedChange={(v) => {
+            if (!config) return;
+            config.autoReport = v;
+            updateConfig(config);
+          }}
+        />
+        <Label for="auto-report">Auto Report (End of Game)</Label>
+      </div>
     </div>
   </div>
   <div class="grid grid-cols-2 text-sm">
@@ -107,6 +135,29 @@
       </div>
     </div>
   </div>
+  {#if endOfGameReport && endOfGameReport.results.length > 0}
+    <div class="border rounded-md p-2 text-xs flex flex-col gap-1 bg-primary-foreground">
+      <div class="font-medium">
+        Last Auto Report (Game {endOfGameReport.gameId})
+      </div>
+      {#each endOfGameReport.results as result}
+        <div class="flex justify-between gap-2">
+          <span class="truncate">
+            {result.summonerName}
+            {#if result.championName}
+              ({result.championName})
+            {/if}
+          </span>
+          <span class={`font-medium ${statusClasses[result.status]}`}>
+            {statusLabels[result.status]}
+          </span>
+        </div>
+        <div class="text-muted-foreground text-[10px]">
+          {result.message}
+        </div>
+      {/each}
+    </div>
+  {/if}
   {#if state === "ChampSelect"}
     <div in:fade class="flex flex-col gap-5 w-full">
       {#if champSelect}
