@@ -1,4 +1,6 @@
-use crate::{champ_select::handle_champ_select_start, AppConfig};
+use crate::{
+    champ_select::handle_champ_select_start, end_game::handle_end_game, AppConfig, EndGameState,
+};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -54,6 +56,39 @@ pub async fn handle_client_state(
                     )
                     .await;
             }
+        }
+        "PreEndOfGame" | "EndOfGame" => {
+            let cloned_app_handle = app_handle.clone();
+            let cloned_remoting = remoting_client.clone();
+
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                let end_game_state = cloned_app_handle.state::<EndGameState>();
+                let friends_loaded = {
+                    let state = end_game_state.0.lock().await;
+                    state.friends_loaded
+                };
+
+                if !friends_loaded {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+
+                let cfg = cloned_app_handle.state::<AppConfig>();
+                let cfg = cfg.0.lock().await;
+
+                let end_game_state = cloned_app_handle.state::<EndGameState>();
+                let mut end_game_data = end_game_state.0.lock().await;
+
+                handle_end_game(
+                    &cloned_remoting,
+                    &cfg,
+                    &cloned_app_handle,
+                    &mut end_game_data.last_game_id,
+                    &end_game_data.friend_ids,
+                )
+                .await;
+            });
         }
         _ => {}
     }
