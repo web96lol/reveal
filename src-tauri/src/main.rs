@@ -6,6 +6,7 @@ mod champ_select;
 mod commands;
 mod lobby;
 mod region;
+mod reporting;
 mod state;
 mod summoner;
 mod utils;
@@ -31,6 +32,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
+use reporting::{preload_friends, reset_connection_state, ManagedReportState, ReportState};
+
 struct LCU(Mutex<LCUState>);
 
 pub struct LCUState {
@@ -53,6 +56,8 @@ struct Config {
     pub auto_open: bool,
     pub auto_accept: bool,
     pub accept_delay: u32,
+    #[serde(default)]
+    pub auto_report: bool,
     #[serde(default = "default_provider")]
     pub multi_provider: String,
 }
@@ -71,6 +76,7 @@ fn main() {
             last_dodge: None,
             enabled: None,
         })))
+        .manage(ManagedReportState(Mutex::new(ReportState::default())))
         .setup(|app| {
             let app_handle = app.handle();
             let cfg_folder = app.path_resolver().app_config_dir().unwrap();
@@ -84,6 +90,7 @@ fn main() {
                     auto_open: true,
                     auto_accept: false,
                     accept_delay: 2000,
+                    auto_report: false,
                     multi_provider: "opgg".to_string(),
                 };
 
@@ -116,6 +123,9 @@ fn main() {
                     let lcu_info = process_info::get_auth_info(args).unwrap();
                     let app_client = RESTClient::new(lcu_info.clone(), false).unwrap();
                     let remoting_client = RESTClient::new(lcu_info.clone(), true).unwrap();
+
+                    reset_connection_state(&app_handle).await;
+                    preload_friends(&app_handle, &app_client).await;
 
                     let cloned_app_handle = app_handle.clone();
                     let lcu = cloned_app_handle.state::<LCU>();
@@ -196,6 +206,25 @@ async fn handle_ws_message(
     match msg_type.as_str() {
         "OnJsonApiEvent_lol-gameflow_v1_gameflow-phase" => {
             let client_state = msg.data.to_string().replace('\"', "");
+
+            if matches!(client_state.as_str(), "PreEndOfGame" | "EndOfGame") {
+                let should_auto_report = {
+                    let cfg = app_handle.state::<AppConfig>();
+                    let cfg = cfg.0.lock().await;
+                    cfg.auto_report
+                };
+
+                if should_auto_report {
+                    let cloned_handle = app_handle.clone();
+                    let cloned_client = app_client.clone();
+
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                        reporting::handle_end_of_game(&cloned_handle, &cloned_client).await;
+                    });
+                }
+            }
+
             state::handle_client_state(client_state, app_handle, remoting_client, app_client).await;
         }
         "OnJsonApiEvent_lol-champ-select_v1_session" => {

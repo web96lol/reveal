@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/tauri";
 export interface Config {
     autoOpen: boolean;
     autoAccept: boolean;
+    autoReport: boolean;
     acceptDelay: number;
     multiProvider: string
 }
