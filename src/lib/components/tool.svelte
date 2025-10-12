@@ -93,6 +93,18 @@
         />
         <Label for="auto-accept">Auto Accept</Label>
       </div>
+      <div class="flex items-center space-x-2">
+        <Switch
+          checked={config?.autoReport}
+          id="auto-report"
+          onCheckedChange={(v) => {
+            if (!config) return;
+            config.autoReport = v;
+            updateConfig(config);
+          }}
+        />
+        <Label for="auto-report">Auto Report</Label>
+      </div>
     </div>
   </div>
   <div class="grid grid-cols-2 text-sm">
