@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { listen } from "@tauri-apps/api/event";
   import { invoke } from "@tauri-apps/api/tauri";
+  import { onDestroy, onMount } from "svelte";
   import { updateConfig, type Config } from "$lib/config";
   import { fade } from "svelte/transition";
   import RevealCount from "./reveal-count.svelte";
@@ -8,6 +10,7 @@
   import { Label } from "./ui/label";
   import { Button } from "./ui/button";
   import * as Select from "$lib/components/ui/select";
+  import type { PostGameSummary } from "$lib/post-game";
 
   export let config: Config | null = null;
   export let state = "Unknown";
@@ -15,6 +18,11 @@
   export let connected = false;
 
   let lastSecondDodgeEnabled = false;
+  let processingLastGame = false;
+  let postGameSummary: PostGameSummary | null = null;
+  let postGameError: string | null = null;
+  let unlistenProcessed: (() => void) | null = null;
+  let unlistenFailed: (() => void) | null = null;
   $: if (state !== "ChampSelect" && lastSecondDodgeEnabled) {
     // lobby is prob dodged or started, can reset state now
     lastSecondDodgeEnabled = false;
@@ -38,6 +46,49 @@
       value: "tracker",
     },
   ];
+
+  async function handleProcessLastGame() {
+    processingLastGame = true;
+    postGameError = null;
+    try {
+      postGameSummary = await invoke<PostGameSummary>("process_last_game");
+    } catch (error) {
+      postGameSummary = null;
+      if (typeof error === "string") {
+        postGameError = error;
+      } else if (error && typeof error === "object" && "message" in error) {
+        postGameError = String((error as { message?: unknown }).message);
+      } else {
+        postGameError = "Failed to process last game.";
+      }
+    } finally {
+      processingLastGame = false;
+    }
+  }
+
+  function setPostGameSummary(summary: PostGameSummary) {
+    postGameSummary = summary;
+    postGameError = null;
+  }
+
+  onMount(async () => {
+    unlistenProcessed = await listen<PostGameSummary>(
+      "post_game_processed",
+      (event) => {
+        setPostGameSummary(event.payload);
+      }
+    );
+
+    unlistenFailed = await listen<string>("post_game_failed", (event) => {
+      postGameSummary = null;
+      postGameError = event.payload;
+    });
+  });
+
+  onDestroy(() => {
+    unlistenProcessed?.();
+    unlistenFailed?.();
+  });
 </script>
 
 <div class="flex flex-col gap-2">
@@ -93,6 +144,18 @@
         />
         <Label for="auto-accept">Auto Accept</Label>
       </div>
+      <div class="flex items-center space-x-2">
+        <Switch
+          checked={config?.autoReportNonFriends}
+          id="auto-report-non-friends"
+          onCheckedChange={(v) => {
+            if (!config) return;
+            config.autoReportNonFriends = v;
+            updateConfig(config);
+          }}
+        />
+        <Label for="auto-report-non-friends">Auto Report Non-Friends</Label>
+      </div>
     </div>
   </div>
   <div class="grid grid-cols-2 text-sm">
@@ -106,6 +169,69 @@
         <RevealCount />
       </div>
     </div>
+  </div>
+  <div class="flex flex-col gap-2">
+    <Button
+      class="w-full md:w-[220px]"
+      size="sm"
+      disabled={!connected || processingLastGame}
+      on:click={handleProcessLastGame}
+    >
+      {#if processingLastGame}
+        Processing Last Game...
+      {:else}
+        Process Last Game
+      {/if}
+    </Button>
+    {#if postGameSummary}
+      <div class="rounded-md border p-2 text-xs bg-primary-foreground">
+        <div class="font-medium">Processed Game {postGameSummary.gameId}</div>
+        {#if postGameSummary.players.length > 0}
+          <div class="mt-2 flex flex-col gap-2">
+            {#each postGameSummary.players as player}
+              <div class="flex justify-between gap-4 rounded border bg-secondary/30 p-2">
+                <div class="flex flex-col gap-1">
+                  <div class="font-medium">
+                    {player.gameName ?? player.summonerName ?? player.puuid}
+                    {#if player.tagLine}
+                      #{player.tagLine}
+                    {/if}
+                  </div>
+                  {#if player.summonerName && player.summonerName !== player.gameName}
+                    <div class="text-muted-foreground">
+                      Summoner: {player.summonerName}
+                    </div>
+                  {/if}
+                </div>
+                <div class="flex flex-col items-end gap-1 text-[11px] text-muted-foreground">
+                  <span>
+                    Friend Request:
+                    <span class={player.friendRequestSent ? "text-foreground" : "text-destructive"}>
+                      {player.friendRequestSent ? "Sent" : "Failed"}
+                    </span>
+                  </span>
+                  <span>
+                    Report:
+                    <span class={player.reportSent ? "text-foreground" : "text-destructive"}>
+                      {player.reportSent ? "Sent" : "Failed"}
+                    </span>
+                  </span>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {:else}
+          <div class="mt-1 text-muted-foreground">
+            No non-friends found to process.
+          </div>
+        {/if}
+      </div>
+    {/if}
+    {#if postGameError}
+      <div class="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
+        {postGameError}
+      </div>
+    {/if}
   </div>
   {#if state === "ChampSelect"}
     <div in:fade class="flex flex-col gap-5 w-full">
