@@ -4,7 +4,8 @@ export interface Config {
     autoOpen: boolean;
     autoAccept: boolean;
     acceptDelay: number;
-    multiProvider: string
+    multiProvider: string;
+    autoReport: boolean;
 }
 
 export async function updateConfig(config: Config) {
