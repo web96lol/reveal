@@ -146,6 +146,12 @@ pub async fn handle_champ_select_start(
         display_champ_select(&team, region, &config.multi_provider);
     }
 
-    let summoner = summoner::get_current_summoner(remoting_client).await;
-    analytics::send_analytics_event(&team, &summoner, &region_info).await;
+    match summoner::try_get_current_summoner(remoting_client).await {
+        Ok(summoner) => {
+            analytics::send_analytics_event(&team, &summoner, &region_info).await;
+        }
+        Err(err) => {
+            println!("Failed to load summoner for analytics: {err:?}");
+        }
+    }
 }
