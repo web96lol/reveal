@@ -93,6 +93,18 @@
         />
         <Label for="auto-accept">Auto Accept</Label>
       </div>
+      <div class="flex items-center space-x-2">
+        <Switch
+          checked={config?.autoReport}
+          id="auto-report"
+          onCheckedChange={(v) => {
+            if (!config) return;
+            config.autoReport = v;
+            updateConfig(config);
+          }}
+        />
+        <Label for="auto-report">Auto Report</Label>
+      </div>
     </div>
   </div>
   <div class="grid grid-cols-2 text-sm">
@@ -152,6 +164,14 @@
     </div>
   {:else if state === "InProgress"}
     <div in:fade class="flex gap-2 items-center animate-pulse">In Game</div>
+  {:else if state === "PreEndOfGame" || state === "EndOfGame"}
+    <div in:fade class="flex gap-2 items-center">
+      {#if config?.autoReport}
+        <span class="animate-pulse">Processing Reports...</span>
+      {:else}
+        <span>Game Ended</span>
+      {/if}
+    </div>
   {:else if !connected}
     <div in:fade class="flex gap-2 items-center animate-pulse">
       Trying to find League Client...

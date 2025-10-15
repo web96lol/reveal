@@ -4,6 +4,7 @@
 mod analytics;
 mod champ_select;
 mod commands;
+mod end_game;
 mod lobby;
 mod region;
 mod state;
@@ -43,6 +44,8 @@ struct ManagedDodgeState(Mutex<DodgeState>);
 pub struct DodgeState {
     pub last_dodge: Option<u64>,
     pub enabled: Option<u64>,
+    pub last_reported_game: Option<u64>,
+    pub is_reporting: bool,
 }
 
 struct AppConfig(Mutex<Config>);
@@ -55,6 +58,8 @@ struct Config {
     pub accept_delay: u32,
     #[serde(default = "default_provider")]
     pub multi_provider: String,
+    #[serde(default)]
+    pub auto_report: bool,
 }
 
 fn default_provider() -> String {
@@ -70,6 +75,8 @@ fn main() {
         .manage(ManagedDodgeState(Mutex::new(DodgeState {
             last_dodge: None,
             enabled: None,
+            last_reported_game: None,
+            is_reporting: false,
         })))
         .setup(|app| {
             let app_handle = app.handle();
@@ -85,6 +92,7 @@ fn main() {
                     auto_accept: false,
                     accept_delay: 2000,
                     multi_provider: "opgg".to_string(),
+                    auto_report: false,
                 };
 
                 let cfg_json = serde_json::to_string(&cfg).unwrap();
@@ -105,6 +113,11 @@ fn main() {
                             println!("Waiting for League Client to open...");
                             connected = false;
                             app_handle.emit_all("lcu_state_update", false).unwrap();
+
+                            let dodge_state = app_handle.state::<ManagedDodgeState>();
+                            let mut dodge_state = dodge_state.0.lock().await;
+                            dodge_state.last_reported_game = None;
+                            dodge_state.is_reporting = false;
                         }
 
                         tokio::time::sleep(Duration::from_secs(2)).await;
