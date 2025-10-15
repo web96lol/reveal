@@ -94,14 +94,10 @@
       </div>
     </div>
   </div>
-  <div class="grid grid-cols-2 text-sm">
+  <div class="grid text-sm">
     <div class="flex flex-col">
       <div class="text-muted-foreground text-xs">State</div>
       <div>{state}</div>
-    </div>
-    <div class="flex flex-col">
-      <div class="text-muted-foreground text-xs">Revealed Champ Selects</div>
-      <div class="text-muted-foreground">Not tracked (analytics disabled)</div>
     </div>
   </div>
   {#if state === "ChampSelect"}
