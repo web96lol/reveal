@@ -1,5 +1,6 @@
 use crate::{
     champ_select::handle_champ_select_start, end_game::handle_end_game, AppConfig, EndGameState,
+    ManagedAutoReportState,
 };
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
@@ -64,31 +65,20 @@ pub async fn handle_client_state(
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-                let end_game_state = cloned_app_handle.state::<EndGameState>();
+                let auto_report_state = cloned_app_handle.state::<ManagedAutoReportState>();
+                let auto_report_enabled = {
+                    let state = auto_report_state.0.lock().await;
+                    state.enabled
+                };
 
-                const MAX_FRIEND_WAIT_ATTEMPTS: usize = 10;
-                let mut attempts = 0;
-
-                loop {
-                    let friends_loaded = {
-                        let state = end_game_state.0.lock().await;
-                        state.friends_loaded
-                    };
-
-                    if friends_loaded {
-                        break;
-                    }
-
-                    if attempts >= MAX_FRIEND_WAIT_ATTEMPTS {
-                        println!(
-                            "Skipping auto report - friends list was not loaded after waiting."
-                        );
-                        return;
-                    }
-
-                    attempts += 1;
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if !auto_report_enabled {
+                    println!(
+                        "Skipping auto report - friends list not loaded or auto report disabled."
+                    );
+                    return;
                 }
+
+                let end_game_state = cloned_app_handle.state::<EndGameState>();
 
                 let cfg = cloned_app_handle.state::<AppConfig>();
                 let cfg = cfg.0.lock().await;

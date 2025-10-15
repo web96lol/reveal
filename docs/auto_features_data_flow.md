@@ -87,7 +87,7 @@ This document captures the precise runtime paths for the Auto Open Multi ("auto 
 ## `src-tauri/src/main.rs`
 
 ### Imports
-- The module declarations (`mod analytics;`, etc.) and `use` statements bring the Tauri-managed state types (`LCU`, `ManagedDodgeState`, `AppConfig`, `EndGameState`) plus helper modules into scope. Notable `use crate` lines include:
+- The module declarations (`mod analytics;`, etc.) and `use` statements bring the Tauri-managed state types (`LCU`, `ManagedDodgeState`, `ManagedAutoReportState`, `AppConfig`, `EndGameState`) plus helper modules into scope. Notable `use crate` lines include:
   - `use crate::champ_select::ChampSelectSession;`
   - `use crate::lobby::Lobby;`
   - `use crate::region::RegionInfo;`
@@ -108,10 +108,10 @@ This document captures the precise runtime paths for the Auto Open Multi ("auto 
 2. Because `set_config` saved `auto_accept` and `accept_delay`, `handle_client_state` can honor them and call the accept endpoint.
 
 ### Auto Report data path
-1. `main.rs` registers an additional managed state (`EndGameState`) that stores cached friend IDs, the last processed game ID, and a readiness flag.
-2. When the League client disconnects, it clears that state so the next session starts fresh.
-3. As soon as the REST clients come online, it spawns a delayed task that calls `get_friends_ids`, fills the `HashSet`, and marks `friends_loaded = true`—all of which rely on the new `use` imports.
-4. Gameflow websocket events are still routed to `state::handle_client_state`, which now has the data it needs to run auto report.
+1. `main.rs` registers additional managed state (`EndGameState` and `ManagedAutoReportState`) that stores cached friend IDs, the last processed game ID, and whether auto reporting is allowed to run.
+2. When the League client disconnects, it clears those caches and flips `ManagedAutoReportState.enabled = false` so the next session starts fresh.
+3. As soon as the REST clients come online, it spawns a delayed task that repeatedly calls `get_friends_ids` until it succeeds, fills the `HashSet`, marks `friends_loaded = true`, and flips `ManagedAutoReportState.enabled = true`.
+4. Gameflow websocket events are still routed to `state::handle_client_state`, which now skips auto reporting entirely until the friends list has loaded.
 
 ## `src-tauri/src/end_game.rs`
 
@@ -128,7 +128,7 @@ This document captures the precise runtime paths for the Auto Open Multi ("auto 
   - Allows the module to emit the `end_game_reports_sent` event back to the front end once processing completes.
 
 ### Auto Report data path
-1. `get_friends_ids` fetches `/lol-chat/v1/friends`, deserializes it with `serde`, and returns a `HashSet<u64>` of friend IDs. `main.rs` caches this in `EndGameState` so reporting logic can skip friends.
+1. `get_friends_ids` fetches `/lol-chat/v1/friends`, deserializes it with `serde`, and returns a `Result<HashSet<u64>>` of friend IDs. `main.rs` caches this in `EndGameState` so reporting logic can skip friends and only enables auto report once the call succeeds.
 2. `handle_end_game` exits immediately when `config.auto_report` is `false`. When enabled, it pulls `/lol-end-of-game/v1/eog-stats-block`, deserializes it, and checks `last_game_id` to avoid duplicate submissions.
 3. It then iterates every player via `handle_player_report`, skipping the local summoner and anyone in the friend cache. Each remaining player is reported with the seven hard-coded categories via the `RESTClient` POST call.
 4. After iterating, it updates `last_game_id` and emits `end_game_reports_sent` so the UI can react if desired.

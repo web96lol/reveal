@@ -1,4 +1,5 @@
 use crate::Config;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use shaco::rest::RESTClient;
 use std::collections::HashSet;
@@ -52,14 +53,15 @@ pub struct PlayerReportPayload {
     pub offender_puuid: String,
 }
 
-pub async fn get_friends_ids(remoting_client: &RESTClient) -> HashSet<u64> {
+pub async fn get_friends_ids(remoting_client: &RESTClient) -> Result<HashSet<u64>> {
     let response = remoting_client
         .get("/lol-chat/v1/friends".to_string())
         .await
-        .unwrap();
+        .context("Failed to fetch friends list")?;
 
-    let friends = serde_json::from_value::<Vec<Friend>>(response).unwrap_or_default();
-    friends.into_iter().map(|f| f.summoner_id).collect()
+    let friends =
+        serde_json::from_value::<Vec<Friend>>(response).context("Failed to parse friends list")?;
+    Ok(friends.into_iter().map(|f| f.summoner_id).collect())
 }
 
 pub async fn handle_end_game(

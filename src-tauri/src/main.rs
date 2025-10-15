@@ -48,6 +48,12 @@ pub struct DodgeState {
     pub enabled: Option<u64>,
 }
 
+struct ManagedAutoReportState(Mutex<AutoReportState>);
+
+pub struct AutoReportState {
+    pub enabled: bool,
+}
+
 struct AppConfig(Mutex<Config>);
 
 struct EndGameState(Mutex<EndGameData>);
@@ -83,6 +89,9 @@ fn main() {
         .manage(ManagedDodgeState(Mutex::new(DodgeState {
             last_dodge: None,
             enabled: None,
+        })))
+        .manage(ManagedAutoReportState(Mutex::new(AutoReportState {
+            enabled: false,
         })))
         .manage(EndGameState(Mutex::new(EndGameData {
             last_game_id: None,
@@ -129,6 +138,10 @@ fn main() {
                             end_game_state.last_game_id = None;
                             end_game_state.friend_ids.clear();
                             end_game_state.friends_loaded = false;
+
+                            let auto_report_state = app_handle.state::<ManagedAutoReportState>();
+                            let mut auto_report_state = auto_report_state.0.lock().await;
+                            auto_report_state.enabled = false;
                         }
 
                         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -157,11 +170,29 @@ fn main() {
                     let cloned_app_handle = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(Duration::from_secs(3)).await;
-                        let friend_ids = get_friends_ids(&cloned_remoting).await;
                         let end_game_state = cloned_app_handle.state::<EndGameState>();
-                        let mut end_game_state = end_game_state.0.lock().await;
-                        end_game_state.friend_ids = friend_ids;
-                        end_game_state.friends_loaded = true;
+                        let auto_report_state = cloned_app_handle.state::<ManagedAutoReportState>();
+
+                        loop {
+                            match get_friends_ids(&cloned_remoting).await {
+                                Ok(friend_ids) => {
+                                    let mut end_game_state = end_game_state.0.lock().await;
+                                    end_game_state.friend_ids = friend_ids;
+                                    end_game_state.friends_loaded = true;
+
+                                    let mut auto_report_state = auto_report_state.0.lock().await;
+                                    auto_report_state.enabled = true;
+                                    break;
+                                }
+                                Err(err) => {
+                                    println!(
+                                        "Failed to load friends list for auto report: {:?}",
+                                        err
+                                    );
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                }
+                            }
+                        }
                     });
 
                     // The websocket event API will not be opened until a few seconds after the client is opened.
