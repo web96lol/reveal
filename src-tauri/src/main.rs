@@ -4,6 +4,7 @@
 mod analytics;
 mod champ_select;
 mod commands;
+mod end_game;
 mod lobby;
 mod region;
 mod state;
@@ -11,6 +12,7 @@ mod summoner;
 mod utils;
 
 use crate::champ_select::ChampSelectSession;
+use crate::end_game::get_friends_ids;
 use crate::lobby::Lobby;
 use crate::region::RegionInfo;
 use crate::utils::display_champ_select;
@@ -27,6 +29,7 @@ use shaco::rest::RESTClient;
 use shaco::utils::process_info;
 use shaco::ws::LcuWebsocketClient;
 use shaco::{model::ws::LcuSubscriptionType::JsonApiEvent, rest::LCUClientInfo};
+use std::collections::HashSet;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
@@ -45,7 +48,21 @@ pub struct DodgeState {
     pub enabled: Option<u64>,
 }
 
+struct ManagedAutoReportState(Mutex<AutoReportState>);
+
+pub struct AutoReportState {
+    pub enabled: bool,
+}
+
 struct AppConfig(Mutex<Config>);
+
+struct EndGameState(Mutex<EndGameData>);
+
+pub struct EndGameData {
+    pub last_game_id: Option<u64>,
+    pub friend_ids: HashSet<u64>,
+    pub friends_loaded: bool,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +72,8 @@ struct Config {
     pub accept_delay: u32,
     #[serde(default = "default_provider")]
     pub multi_provider: String,
+    #[serde(default)]
+    pub auto_report: bool,
 }
 
 fn default_provider() -> String {
@@ -71,6 +90,14 @@ fn main() {
             last_dodge: None,
             enabled: None,
         })))
+        .manage(ManagedAutoReportState(Mutex::new(AutoReportState {
+            enabled: false,
+        })))
+        .manage(EndGameState(Mutex::new(EndGameData {
+            last_game_id: None,
+            friend_ids: HashSet::new(),
+            friends_loaded: false,
+        })))
         .setup(|app| {
             let app_handle = app.handle();
             let cfg_folder = app.path_resolver().app_config_dir().unwrap();
@@ -85,6 +112,7 @@ fn main() {
                     auto_accept: false,
                     accept_delay: 2000,
                     multi_provider: "opgg".to_string(),
+                    auto_report: false,
                 };
 
                 let cfg_json = serde_json::to_string(&cfg).unwrap();
@@ -105,6 +133,15 @@ fn main() {
                             println!("Waiting for League Client to open...");
                             connected = false;
                             app_handle.emit_all("lcu_state_update", false).unwrap();
+                            let end_game_state = app_handle.state::<EndGameState>();
+                            let mut end_game_state = end_game_state.0.lock().await;
+                            end_game_state.last_game_id = None;
+                            end_game_state.friend_ids.clear();
+                            end_game_state.friends_loaded = false;
+
+                            let auto_report_state = app_handle.state::<ManagedAutoReportState>();
+                            let mut auto_report_state = auto_report_state.0.lock().await;
+                            auto_report_state.enabled = false;
                         }
 
                         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -128,6 +165,35 @@ fn main() {
                     lcu.data = Some(lcu_info);
 
                     drop(lcu);
+
+                    let cloned_remoting = remoting_client.clone();
+                    let cloned_app_handle = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        let end_game_state = cloned_app_handle.state::<EndGameState>();
+                        let auto_report_state = cloned_app_handle.state::<ManagedAutoReportState>();
+
+                        loop {
+                            match get_friends_ids(&cloned_remoting).await {
+                                Ok(friend_ids) => {
+                                    let mut end_game_state = end_game_state.0.lock().await;
+                                    end_game_state.friend_ids = friend_ids;
+                                    end_game_state.friends_loaded = true;
+
+                                    let mut auto_report_state = auto_report_state.0.lock().await;
+                                    auto_report_state.enabled = true;
+                                    break;
+                                }
+                                Err(err) => {
+                                    println!(
+                                        "Failed to load friends list for auto report: {:?}",
+                                        err
+                                    );
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                }
+                            }
+                        }
+                    });
 
                     // The websocket event API will not be opened until a few seconds after the client is opened.
                     let mut ws = match LcuWebsocketClient::connect().await {

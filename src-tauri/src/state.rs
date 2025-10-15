@@ -1,4 +1,7 @@
-use crate::{champ_select::handle_champ_select_start, AppConfig};
+use crate::{
+    champ_select::handle_champ_select_start, end_game::handle_end_game, AppConfig, EndGameState,
+    ManagedAutoReportState,
+};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -54,6 +57,43 @@ pub async fn handle_client_state(
                     )
                     .await;
             }
+        }
+        "PreEndOfGame" | "EndOfGame" => {
+            let cloned_app_handle = app_handle.clone();
+            let cloned_remoting = remoting_client.clone();
+
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                let auto_report_state = cloned_app_handle.state::<ManagedAutoReportState>();
+                let auto_report_enabled = {
+                    let state = auto_report_state.0.lock().await;
+                    state.enabled
+                };
+
+                if !auto_report_enabled {
+                    println!(
+                        "Skipping auto report - friends list not loaded or auto report disabled."
+                    );
+                    return;
+                }
+
+                let end_game_state = cloned_app_handle.state::<EndGameState>();
+
+                let cfg = cloned_app_handle.state::<AppConfig>();
+                let cfg = cfg.0.lock().await;
+
+                let mut end_game_data = end_game_state.0.lock().await;
+
+                handle_end_game(
+                    &cloned_remoting,
+                    &cfg,
+                    &cloned_app_handle,
+                    &mut end_game_data.last_game_id,
+                    &end_game_data.friend_ids,
+                )
+                .await;
+            });
         }
         _ => {}
     }
