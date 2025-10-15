@@ -4,6 +4,7 @@
 mod analytics;
 mod champ_select;
 mod commands;
+mod end_of_game;
 mod lobby;
 mod region;
 mod state;
@@ -55,10 +56,16 @@ struct Config {
     pub accept_delay: u32,
     #[serde(default = "default_provider")]
     pub multi_provider: String,
+    #[serde(default = "default_auto_report")]
+    pub auto_report: bool,
 }
 
 fn default_provider() -> String {
     "opgg".to_string()
+}
+
+fn default_auto_report() -> bool {
+    false
 }
 
 fn main() {
@@ -85,6 +92,7 @@ fn main() {
                     auto_accept: false,
                     accept_delay: 2000,
                     multi_provider: "opgg".to_string(),
+                    auto_report: default_auto_report(),
                 };
 
                 let cfg_json = serde_json::to_string(&cfg).unwrap();
