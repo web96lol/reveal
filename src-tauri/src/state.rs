@@ -1,4 +1,6 @@
-use crate::{champ_select::handle_champ_select_start, AppConfig};
+use crate::{
+    champ_select::handle_champ_select_start, end_game::handle_end_game, AppConfig, ManagedDodgeState,
+};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -28,8 +30,11 @@ pub async fn handle_client_state(
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-                let cfg = cloned_app_handle.state::<AppConfig>();
-                let cfg = cfg.0.lock().await;
+                let cfg = {
+                    let cfg_state = cloned_app_handle.state::<AppConfig>();
+                    let cfg = cfg_state.0.lock().await;
+                    cfg.clone()
+                };
                 handle_champ_select_start(
                     &cloned_app_client,
                     &cloned_remoting,
@@ -40,11 +45,14 @@ pub async fn handle_client_state(
             });
         }
         "ReadyCheck" => {
-            let cfg = app_handle.state::<AppConfig>();
-            let cfg = cfg.0.lock().await;
-            if cfg.auto_accept {
+            let (auto_accept, accept_delay) = {
+                let cfg = app_handle.state::<AppConfig>();
+                let cfg = cfg.0.lock().await;
+                (cfg.auto_accept, cfg.accept_delay)
+            };
+            if auto_accept {
                 tokio::time::sleep(std::time::Duration::from_millis(
-                    (cfg.accept_delay as u64) - 1000,
+                    (accept_delay as u64) - 1000,
                 ))
                 .await;
                 let _resp = remoting_client
@@ -54,6 +62,43 @@ pub async fn handle_client_state(
                     )
                     .await;
             }
+        }
+        "PreEndOfGame" | "EndOfGame" => {
+            let cloned_app_handle = app_handle.clone();
+            let cloned_remoting = remoting_client.clone();
+
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                let cfg = {
+                    let cfg_state = cloned_app_handle.state::<AppConfig>();
+                    let cfg = cfg_state.0.lock().await;
+                    cfg.clone()
+                };
+
+                if !cfg.auto_report {
+                    return;
+                }
+
+                let last_reported_game = {
+                    let dodge_state = cloned_app_handle.state::<ManagedDodgeState>();
+                    let dodge_state = dodge_state.0.lock().await;
+                    dodge_state.last_reported_game
+                };
+
+                if let Some(new_last) = handle_end_game(
+                    &cloned_remoting,
+                    &cfg,
+                    &cloned_app_handle,
+                    last_reported_game,
+                )
+                .await
+                {
+                    let dodge_state = cloned_app_handle.state::<ManagedDodgeState>();
+                    let mut dodge_state = dodge_state.0.lock().await;
+                    dodge_state.last_reported_game = Some(new_last);
+                }
+            });
         }
         _ => {}
     }
