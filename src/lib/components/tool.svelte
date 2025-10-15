@@ -101,7 +101,7 @@
     </div>
     <div class="flex flex-col">
       <div class="text-muted-foreground text-xs">Revealed Champ Selects</div>
-      <div class="text-muted-foreground">Not tracked</div>
+      <div class="text-muted-foreground">Not tracked (analytics disabled)</div>
     </div>
   </div>
   {#if state === "ChampSelect"}
