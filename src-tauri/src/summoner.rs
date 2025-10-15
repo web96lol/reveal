@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use shaco::rest::RESTClient;
+use std::collections::HashSet;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,4 +43,23 @@ pub async fn get_current_summoner(remoting_client: &RESTClient) -> Summoner {
     .unwrap();
 
     summoner
+}
+
+#[derive(Deserialize)]
+struct Friend {
+    #[serde(rename = "summonerId")]
+    summoner_id: u64,
+}
+
+pub async fn get_friend_ids(remoting_client: &RESTClient) -> HashSet<u64> {
+    let response = match remoting_client
+        .get("/lol-chat/v1/friends".to_string())
+        .await
+    {
+        Ok(value) => value,
+        Err(_) => return HashSet::new(),
+    };
+
+    let friends = serde_json::from_value::<Vec<Friend>>(response).unwrap_or_default();
+    friends.into_iter().map(|friend| friend.summoner_id).collect()
 }
