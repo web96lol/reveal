@@ -40,7 +40,7 @@
 </script>
 
 {#if revealCount === -1}
-  <div class="text-red-500">Failed to fetch analytics</div>
+  <div class="text-red-500">Failed to fetch reveal stats</div>
 {:else}
   {revealCount}
 {/if}

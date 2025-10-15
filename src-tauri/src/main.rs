@@ -1,7 +1,6 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod analytics;
 mod champ_select;
 mod commands;
 mod lobby;
@@ -11,9 +10,6 @@ mod summoner;
 mod utils;
 
 use crate::champ_select::ChampSelectSession;
-use crate::lobby::Lobby;
-use crate::region::RegionInfo;
-use crate::utils::display_champ_select;
 use commands::{
     app_ready, dodge, enable_dodge, get_config, get_lcu_info, get_lcu_state, open_opgg_link,
     set_config,

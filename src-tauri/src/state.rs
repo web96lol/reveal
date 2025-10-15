@@ -23,7 +23,6 @@ pub async fn handle_client_state(
         "ChampSelect" => {
             let cloned_app_handle = app_handle.clone();
             let cloned_app_client = app_client.clone();
-            let cloned_remoting = remoting_client.clone();
 
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -32,7 +31,6 @@ pub async fn handle_client_state(
                 let cfg = cfg.0.lock().await;
                 handle_champ_select_start(
                     &cloned_app_client,
-                    &cloned_remoting,
                     &cfg,
                     &cloned_app_handle,
                 )
