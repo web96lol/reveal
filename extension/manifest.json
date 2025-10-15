@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Append Copy",
+  "description": "Append selected text to a clipboard stack via a context menu action.",
+  "version": "1.1.0",
+  "permissions": [
+    "storage",
+    "clipboardWrite",
+    "contextMenus"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
