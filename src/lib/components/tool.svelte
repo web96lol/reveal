@@ -2,7 +2,6 @@
   import { invoke } from "@tauri-apps/api/tauri";
   import { updateConfig, type Config } from "$lib/config";
   import { fade } from "svelte/transition";
-  import RevealCount from "./reveal-count.svelte";
   import type { ChampSelect } from "$lib/champ_select";
   import { Switch } from "./ui/switch";
   import { Label } from "./ui/label";
@@ -102,9 +101,7 @@
     </div>
     <div class="flex flex-col">
       <div class="text-muted-foreground text-xs">Revealed Champ Selects</div>
-      <div>
-        <RevealCount />
-      </div>
+      <div class="text-muted-foreground">Not tracked</div>
     </div>
   </div>
   {#if state === "ChampSelect"}

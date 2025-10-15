@@ -1,4 +1,4 @@
-use crate::{analytics, lobby, region::RegionInfo, summoner, utils::display_champ_select, Config};
+use crate::{lobby, region::RegionInfo, utils::display_champ_select, Config};
 use serde::{Deserialize, Serialize};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
@@ -146,6 +146,6 @@ pub async fn handle_champ_select_start(
         display_champ_select(&team, region, &config.multi_provider);
     }
 
-    let summoner = summoner::get_current_summoner(remoting_client).await;
-    analytics::send_analytics_event(&team, &summoner, &region_info).await;
+    // Previously, analytics events were sent from this point in the flow. Those calls
+    // have been removed so no champion select data leaves the client.
 }
