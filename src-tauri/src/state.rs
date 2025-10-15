@@ -1,4 +1,6 @@
-use crate::{champ_select::handle_champ_select_start, AppConfig};
+use crate::{
+    champ_select::handle_champ_select_start, end_game::handle_end_game, AppConfig, EndGameState,
+};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -28,8 +30,12 @@ pub async fn handle_client_state(
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-                let cfg = cloned_app_handle.state::<AppConfig>();
-                let cfg = cfg.0.lock().await;
+                let cfg = {
+                    let cfg_state = cloned_app_handle.state::<AppConfig>();
+                    let cfg = cfg_state.0.lock().await;
+                    cfg.clone()
+                };
+
                 handle_champ_select_start(
                     &cloned_app_client,
                     &cloned_remoting,
@@ -40,11 +46,15 @@ pub async fn handle_client_state(
             });
         }
         "ReadyCheck" => {
-            let cfg = app_handle.state::<AppConfig>();
-            let cfg = cfg.0.lock().await;
-            if cfg.auto_accept {
+            let (auto_accept, accept_delay) = {
+                let cfg = app_handle.state::<AppConfig>();
+                let cfg = cfg.0.lock().await;
+                (cfg.auto_accept, cfg.accept_delay)
+            };
+
+            if auto_accept {
                 tokio::time::sleep(std::time::Duration::from_millis(
-                    (cfg.accept_delay as u64) - 1000,
+                    (accept_delay as u64).saturating_sub(1000),
                 ))
                 .await;
                 let _resp = remoting_client
@@ -54,6 +64,44 @@ pub async fn handle_client_state(
                     )
                     .await;
             }
+        }
+        "PreEndOfGame" | "EndOfGame" => {
+            let cloned_app_handle = app_handle.clone();
+            let cloned_remoting = remoting_client.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                let friends_loaded = {
+                    let end_game_state = cloned_app_handle.state::<EndGameState>();
+                    let state = end_game_state.0.lock().await;
+                    state.friends_loaded
+                };
+
+                if !friends_loaded {
+                    println!("Waiting for friends list to load...");
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+
+                let auto_report = {
+                    let cfg_state = cloned_app_handle.state::<AppConfig>();
+                    let cfg = cfg_state.0.lock().await;
+                    cfg.auto_report
+                };
+
+                if !auto_report {
+                    return;
+                }
+
+                let end_game_state = cloned_app_handle.state::<EndGameState>();
+                let mut end_game_data = end_game_state.0.lock().await;
+                handle_end_game(
+                    &cloned_remoting,
+                    &cloned_app_handle,
+                    &mut end_game_data.last_game_id,
+                    &end_game_data.friend_ids,
+                )
+                .await;
+            });
         }
         _ => {}
     }

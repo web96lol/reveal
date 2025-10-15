@@ -4,6 +4,7 @@
 mod analytics;
 mod champ_select;
 mod commands;
+mod end_game;
 mod lobby;
 mod region;
 mod state;
@@ -27,34 +28,45 @@ use shaco::rest::RESTClient;
 use shaco::utils::process_info;
 use shaco::ws::LcuWebsocketClient;
 use shaco::{model::ws::LcuSubscriptionType::JsonApiEvent, rest::LCUClientInfo};
+use std::collections::HashSet;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
-struct LCU(Mutex<LCUState>);
+pub struct LCU(Mutex<LCUState>);
 
 pub struct LCUState {
     pub connected: bool,
     pub data: Option<LCUClientInfo>,
 }
 
-struct ManagedDodgeState(Mutex<DodgeState>);
+pub struct ManagedDodgeState(Mutex<DodgeState>);
 
 pub struct DodgeState {
     pub last_dodge: Option<u64>,
     pub enabled: Option<u64>,
 }
 
-struct AppConfig(Mutex<Config>);
+pub struct EndGameState(pub Mutex<EndGameData>);
+
+pub struct EndGameData {
+    pub last_game_id: Option<u64>,
+    pub friend_ids: HashSet<u64>,
+    pub friends_loaded: bool,
+}
+
+pub struct AppConfig(Mutex<Config>);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
-struct Config {
+pub struct Config {
     pub auto_open: bool,
     pub auto_accept: bool,
     pub accept_delay: u32,
     #[serde(default = "default_provider")]
     pub multi_provider: String,
+    #[serde(default)]
+    pub auto_report: bool,
 }
 
 fn default_provider() -> String {
@@ -71,6 +83,11 @@ fn main() {
             last_dodge: None,
             enabled: None,
         })))
+        .manage(EndGameState(Mutex::new(EndGameData {
+            last_game_id: None,
+            friend_ids: HashSet::new(),
+            friends_loaded: false,
+        })))
         .setup(|app| {
             let app_handle = app.handle();
             let cfg_folder = app.path_resolver().app_config_dir().unwrap();
@@ -85,6 +102,7 @@ fn main() {
                     auto_accept: false,
                     accept_delay: 2000,
                     multi_provider: "opgg".to_string(),
+                    auto_report: false,
                 };
 
                 let cfg_json = serde_json::to_string(&cfg).unwrap();
@@ -105,6 +123,12 @@ fn main() {
                             println!("Waiting for League Client to open...");
                             connected = false;
                             app_handle.emit_all("lcu_state_update", false).unwrap();
+
+                            let end_game_state = app_handle.state::<EndGameState>();
+                            let mut end_game_state = end_game_state.0.lock().await;
+                            end_game_state.last_game_id = None;
+                            end_game_state.friend_ids.clear();
+                            end_game_state.friends_loaded = false;
                         }
 
                         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -158,6 +182,21 @@ fn main() {
                         .unwrap();
 
                     println!("Connected to League Client!");
+
+                    let cloned_remoting2 = remoting_client.clone();
+                    let cloned_app_handle2 = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        let friend_ids = summoner::get_friend_ids(&cloned_remoting2).await;
+                        let end_game_state = cloned_app_handle2.state::<EndGameState>();
+                        let mut end_game_state = end_game_state.0.lock().await;
+                        end_game_state.friend_ids = friend_ids;
+                        end_game_state.friends_loaded = true;
+                        println!(
+                            "Friends list loaded ({} friends)",
+                            end_game_state.friend_ids.len()
+                        );
+                    });
 
                     let state = state::get_gameflow_state(&remoting_client).await;
                     state::handle_client_state(state, &app_handle, &remoting_client, &app_client)
