@@ -65,19 +65,34 @@ pub async fn handle_client_state(
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
                 let end_game_state = cloned_app_handle.state::<EndGameState>();
-                let friends_loaded = {
-                    let state = end_game_state.0.lock().await;
-                    state.friends_loaded
-                };
 
-                if !friends_loaded {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                const MAX_FRIEND_WAIT_ATTEMPTS: usize = 10;
+                let mut attempts = 0;
+
+                loop {
+                    let friends_loaded = {
+                        let state = end_game_state.0.lock().await;
+                        state.friends_loaded
+                    };
+
+                    if friends_loaded {
+                        break;
+                    }
+
+                    if attempts >= MAX_FRIEND_WAIT_ATTEMPTS {
+                        println!(
+                            "Skipping auto report - friends list was not loaded after waiting."
+                        );
+                        return;
+                    }
+
+                    attempts += 1;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
 
                 let cfg = cloned_app_handle.state::<AppConfig>();
                 let cfg = cfg.0.lock().await;
 
-                let end_game_state = cloned_app_handle.state::<EndGameState>();
                 let mut end_game_data = end_game_state.0.lock().await;
 
                 handle_end_game(
