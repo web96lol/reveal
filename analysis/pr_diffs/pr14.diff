@@ -1,0 +1,540 @@
+diff --git a/docs/auto_features_data_flow.md b/docs/auto_features_data_flow.md
+new file mode 100644
+index 0000000..92f4392
+--- /dev/null
++++ b/docs/auto_features_data_flow.md
+@@ -0,0 +1,165 @@
++# Auto Multi, Auto Accept, and Auto Report Data Flow Reference
++
++This document captures the precise runtime paths for the Auto Open Multi ("auto multi"), Auto Accept, and Auto Report features, organized by source file so each `use` statement and event hop is clear.
++
++## `src-tauri/src/commands.rs`
++
++### Imports
++- `use crate::{ champ_select::ChampSelectSession, lobby::get_lobby_info, region::RegionInfo, utils::display_champ_select, AppConfig, Config, ManagedDodgeState, LCU };`
++  - Pulls the managed state singletons (`LCU`, `AppConfig`, `ManagedDodgeState`) that Tauri shares with commands, the configuration data model (`Config`), and the helpers that load lobby/team data and open a multi-search provider. Removing these breaks both toggles because the commands could not read or persist settings, construct lobby payloads, or track dodge state.
++- `use shaco::rest::{LCUClientInfo, RESTClient};`
++  - Required for rehydrating REST clients tied to the League Client Update (LCU). Auto multi and auto accept depend on these clients to fetch lobby snapshots and post accept/dodge calls; they cannot function without the `shaco` REST types.
++- `use tauri::{AppHandle, Manager};`
++  - Enables access to shared state and event emission back to the Svelte front end. Without these traits, none of the commands could touch the managed mutexes or emit UI updates.
++
++### Auto Multi data path
++1. The Svelte switches call `set_config` via Tauri, which locks the `AppConfig` mutex, writes the JSON file, and keeps the new `auto_open` flag in memory so later handlers see the change. (`set_config` also relies on `AppHandle` to resolve the config directory.)
++2. When a lobby needs a manual trigger, `open_opgg_link` reconstructs an `RESTClient` from the `LCU` state, reads the `AppConfig`, pulls live lobby details with `get_lobby_info`, normalizes the region code, and calls `display_champ_select`, which launches the configured provider.
++3. Dodge management (`enable_dodge`) deserializes the current `ChampSelectSession` via the `ChampSelectSession` type brought into scope by the `use crate` statement. That keeps the dodge guard in sync with champ select state but does not directly influence the auto-multi toggle.
++
++### Auto Accept data path
++- Auto accept does not run inside `commands.rs`, but `set_config` still needs to persist `auto_accept`, `accept_delay`, and the new `auto_report` toggle. The `use` imports above are what allow that persistence and the subsequent `state.rs` logic to read the updated values.
++
++### Auto Report data path
++- Auto report also depends on `set_config` to push the `auto_report` flag down to Rust. The command shares the same imports and disk write as the other toggles, so no additional `use` lines are needed here.
++
++## `src-tauri/src/state.rs`
++
++- `use crate::{ champ_select::handle_champ_select_start, end_game::handle_end_game, AppConfig, EndGameState };`
++  - Adds the auto report runtime pieces (`handle_end_game`, `EndGameState`) to the existing champ select imports. Without them the new match arm for `PreEndOfGame`/`EndOfGame` would not compile.
++- `use shaco::rest::RESTClient;`
++  - Needed to hit the `/lol-matchmaking/v1/ready-check/accept` endpoint for auto accept and to read `/lol-gameflow/v1/gameflow-phase` to detect champ select transitions.
++- `use tauri::{AppHandle, Manager};`
++  - Required for state access and emitting the `client_state_update` event used by the UI.
++
++### Auto Multi data path
++1. When `handle_client_state` sees `ChampSelect`, it spawns a delayed task. Once the five second delay completes, it re-locks `AppConfig` (using `AppHandle` and `Manager` traits), then calls `handle_champ_select_start`. That call is only possible because `handle_champ_select_start` was imported from `crate::champ_select`.
++2. If the switch is off, `handle_champ_select_start` reads `config.auto_open` (still the same config object) and short-circuits before launching a browser window.
++
++### Auto Accept data path
++1. The same function listens for `ReadyCheck`. When encountered, it locks `AppConfig` and checks `cfg.auto_accept`.
++2. If the flag is true, it waits for `accept_delay - 1000` milliseconds and uses the `RESTClient` import to send a POST request that accepts the ready check automatically.
++3. With the toggle off, the branch is skipped entirely and the user must click accept manually. Either way, the `client_state_update` event propagates to the UI.
++
++### Auto Report data path
++1. When `handle_client_state` sees `PreEndOfGame` or `EndOfGame`, it spawns a short-lived async task.
++2. The task waits 500ms, ensures the friend list has loaded from the shared `EndGameState`, then locks both `AppConfig` and the end-game state mutex.
++3. With those handles, it calls `handle_end_game`, passing mutable access to the cached `last_game_id` and a reference to `friend_ids`. This call is only legal because of the new imports noted above.
++4. If auto report is disabled, the handler returns early; otherwise it continues into the reporting workflow defined in `end_game.rs`.
++
++## `src-tauri/src/champ_select.rs`
++
++### Imports
++- `use crate::{analytics, lobby, region::RegionInfo, summoner, utils::display_champ_select, Config};`
++  - Provides access to lobby fetching, region parsing, summoner lookup, analytics reporting, the UI emitter, and the `Config` structure. Each piece is vital: without `display_champ_select` the auto multi launch cannot occur; without `Config` the code cannot check `auto_open`.
++- `use serde::{Deserialize, Serialize};`
++  - Enables the `ChampSelectSession` data structures to deserialize the LCU websocket payloads. Removing this would stop the dodge guard and UI from understanding champ select state.
++- `use shaco::rest::RESTClient;`
++  - Used for both lobby (`app_client`) and remoting client calls inside `handle_champ_select_start`.
++- `use tauri::{AppHandle, Manager};`
++  - Allows the function to emit the `champ_select_started` event back to the front end.
++
++### Auto Multi data path
++1. `handle_champ_select_start` pulls the live lobby from the app REST client and resolves the region via `/riotclient/region-locale`.
++2. It emits `champ_select_started` so the Svelte component can render participant details.
++3. If `config.auto_open` is true, it normalizes the region (`SG2 → SG`) and calls `display_champ_select`, which builds and opens the provider URL. The `use` imports above are all necessary: remove any, and either the function would not compile or it would fail to launch the link.
++4. It also fetches the current summoner and fires analytics, which do not depend on the toggles but share the same imports.
++
++### Auto Accept data path
++- Auto accept does not run here; this module only supplies champ select context and events. It still matters because the `ChampSelectSession` type (defined here) is the one referenced by `use crate::champ_select::ChampSelectSession` in `commands.rs` and `main.rs`.
++
++### Auto Report data path
++- Auto report does not use `champ_select.rs`, but the `ChampSelectSession` struct remains necessary for dodge management and other champ select flows that share the same managed state.
++
++## `src-tauri/src/utils.rs`
++
++### Imports
++- `use crate::lobby::{Lobby, Participant};`
++  - Gives the helper functions access to player data. All multi-search URL builders depend on this struct shape.
++- `use urlencoding::encode;`
++  - Used to encode summoner tags safely into URLs.
++
++### Auto Multi data path
++1. `display_champ_select` acts on the lobby participants produced by `get_lobby_info` or the websocket event and chooses the proper URL builder (OP.GG, DeepLoL, U.GG, Tracker).
++2. The helper returns early if the lobby is empty, prints the participants for logging, constructs the URL, and finally calls `open::that` to launch the browser tab. Auto multi relies on this function—when the toggle is on, `handle_champ_select_start` invokes it automatically; when off, it is only triggered by the `open_opgg_link` command.
++3. Because the helpers are pure functions that only depend on `Lobby`/`Participant` and `encode`, they are reusable regardless of the toggle state.
++
++## `src-tauri/src/main.rs`
++
++### Imports
++- The module declarations (`mod analytics;`, etc.) and `use` statements bring the Tauri-managed state types (`LCU`, `ManagedDodgeState`, `AppConfig`, `EndGameState`) plus helper modules into scope. Notable `use crate` lines include:
++  - `use crate::champ_select::ChampSelectSession;`
++  - `use crate::lobby::Lobby;`
++  - `use crate::region::RegionInfo;`
++  - `use crate::utils::display_champ_select;`
++  - `use crate::end_game::get_friends_ids;`
++  These ensure the websocket handler and dodge logic can deserialize champ select events, send lobby snapshots to the UI, and reuse the multi-link helper for analytics or logging.
++- `use commands::{ app_ready, dodge, enable_dodge, get_config, get_lcu_info, get_lcu_state, open_opgg_link, set_config };`
++  - Registers every command—including `set_config` and `open_opgg_link`, which are the execution entry points for both toggles.
++- The additional `use` statements for `shaco`, `tauri`, `tokio`, `serde`, `std::collections::HashSet`, and `futures_util` wire up websocket subscriptions, timers, friend caching, and event emission.
++
++### Auto Multi data path
++1. `main.rs` sets up the managed `LCU`, `ManagedDodgeState`, and `AppConfig` mutexes that `commands.rs` and `state.rs` share.
++2. It spins an async task that discovers the League client, builds REST clients, and then launches a websocket listener.
++3. When `/lol-gameflow/v1/gameflow-phase` emits `ChampSelect`, the handler routes the payload to `state::handle_client_state`, which eventually calls `handle_champ_select_start` and (if enabled) `display_champ_select`.
++
++### Auto Accept data path
++1. The same websocket loop forwards `ReadyCheck` phases to `state::handle_client_state`.
++2. Because `set_config` saved `auto_accept` and `accept_delay`, `handle_client_state` can honor them and call the accept endpoint.
++
++### Auto Report data path
++1. `main.rs` registers an additional managed state (`EndGameState`) that stores cached friend IDs, the last processed game ID, and a readiness flag.
++2. When the League client disconnects, it clears that state so the next session starts fresh.
++3. As soon as the REST clients come online, it spawns a delayed task that calls `get_friends_ids`, fills the `HashSet`, and marks `friends_loaded = true`—all of which rely on the new `use` imports.
++4. Gameflow websocket events are still routed to `state::handle_client_state`, which now has the data it needs to run auto report.
++
++## `src-tauri/src/end_game.rs`
++
++### Imports
++- `use crate::Config;`
++  - Gives the module access to the auto report toggle and the configuration schema, ensuring it can decide whether to send reports.
++- `use serde::{Deserialize, Serialize};`
++  - Powers deserialization of the `/lol-end-of-game/v1/eog-stats-block` response and serialization of the reporting payloads.
++- `use shaco::rest::RESTClient;`
++  - Required for both fetching end-of-game statistics and submitting report POST requests.
++- `use std::collections::HashSet;`
++  - Stores friend IDs for quick lookups so that friends are never auto-reported.
++- `use tauri::{AppHandle, Manager};`
++  - Allows the module to emit the `end_game_reports_sent` event back to the front end once processing completes.
++
++### Auto Report data path
++1. `get_friends_ids` fetches `/lol-chat/v1/friends`, deserializes it with `serde`, and returns a `HashSet<u64>` of friend IDs. `main.rs` caches this in `EndGameState` so reporting logic can skip friends.
++2. `handle_end_game` exits immediately when `config.auto_report` is `false`. When enabled, it pulls `/lol-end-of-game/v1/eog-stats-block`, deserializes it, and checks `last_game_id` to avoid duplicate submissions.
++3. It then iterates every player via `handle_player_report`, skipping the local summoner and anyone in the friend cache. Each remaining player is reported with the seven hard-coded categories via the `RESTClient` POST call.
++4. After iterating, it updates `last_game_id` and emits `end_game_reports_sent` so the UI can react if desired.
++
++## Front-end (`src/lib/components/tool.svelte` and `src/lib/config.ts`)
++
++### Imports
++- `import { invoke } from "@tauri-apps/api/tauri";`
++  - Lets the UI call the Rust commands. Without it, the switches could not trigger `set_config` or `open_opgg_link`.
++- `import { updateConfig, type Config } from "$lib/config";`
++  - Supplies the TypeScript shape that mirrors the Rust `Config` and the wrapper that invokes `set_config`. The interface now includes `autoReport`, ensuring the toggle's state travels with the other switches.
++- Component imports (`Switch`, `Label`, `Button`, `Select`) shape the UI but do not alter data flow.
++
++### Auto Multi data path
++1. When the user toggles **Auto Open Multi**, the `onCheckedChange` handler updates the local `config.autoOpen` flag and calls `updateConfig`, which invokes the `set_config` command. With the switch off, it writes `false`, so the backend guard short-circuits.
++2. The “Open Multi Link” button always calls `open_opgg_link`, regardless of toggle state.
++
++### Auto Accept data path
++1. The **Auto Accept** switch mirrors the same pattern, updating `config.autoAccept` and persisting the change through `set_config`.
++2. No front-end component accepts the queue pop directly—the actual accept is handled in Rust once `ReadyCheck` fires.
++
++### Auto Report data path
++1. The **Auto Report** switch toggles `config.autoReport` and invokes `updateConfig`, persisting the choice through Tauri.
++2. When the client state transitions to `PreEndOfGame` or `EndOfGame`, the UI shows "Processing Reports..." if auto report is enabled; otherwise it simply displays "Game Ended." Any additional feedback (such as listening for `end_game_reports_sent`) can be layered on later.
++
++## Switch on vs. off summary
++- **Auto Open Multi ON:** `set_config` stores `auto_open = true` → `handle_client_state` detects `ChampSelect` → `handle_champ_select_start` emits the event and calls `display_champ_select`, which builds and opens the URL automatically.
++- **Auto Open Multi OFF:** The same detection path runs, but `handle_champ_select_start` skips `display_champ_select`. Manual multi-link opening via `open_opgg_link` remains available.
++- **Auto Accept ON:** `set_config` stores `auto_accept = true` → `handle_client_state` waits `accept_delay - 1000` ms during `ReadyCheck` → REST POST to `/lol-matchmaking/v1/ready-check/accept` occurs automatically.
++- **Auto Accept OFF:** `handle_client_state` ignores the branch, so the player must click Accept.
++- **Auto Report ON:** `set_config` stores `auto_report = true` → `handle_client_state` spawns the end-game task → `handle_end_game` fetches the stats block, filters friends, and sequentially posts reports → `end_game_reports_sent` fires when the loop finishes.
++- **Auto Report OFF:** `handle_end_game` returns immediately after checking the config flag, so no network calls or events fire.
++
++These flows rely directly on the `use` imports listed above; removing any of the critical crate references would either break compilation or disable the automation paths.
+diff --git a/src-tauri/src/end_game.rs b/src-tauri/src/end_game.rs
+new file mode 100644
+index 0000000..3f6a197
+--- /dev/null
++++ b/src-tauri/src/end_game.rs
+@@ -0,0 +1,157 @@
++use crate::Config;
++use serde::{Deserialize, Serialize};
++use shaco::rest::RESTClient;
++use std::collections::HashSet;
++use tauri::{AppHandle, Manager};
++
++#[derive(Deserialize)]
++struct Friend {
++    #[serde(rename = "summonerId")]
++    summoner_id: u64,
++}
++
++#[derive(Deserialize)]
++pub struct EndOfGameStats {
++    #[serde(rename = "gameId")]
++    pub game_id: u64,
++    #[serde(rename = "localPlayer")]
++    pub local_player: LocalPlayer,
++    pub teams: Vec<Team>,
++}
++
++#[derive(Deserialize)]
++pub struct LocalPlayer {
++    #[serde(rename = "summonerId")]
++    pub summoner_id: u64,
++}
++
++#[derive(Deserialize)]
++pub struct Team {
++    pub players: Vec<Player>,
++}
++
++#[derive(Deserialize)]
++pub struct Player {
++    #[serde(rename = "summonerId")]
++    pub summoner_id: u64,
++    #[serde(rename = "summonerName")]
++    pub summoner_name: String,
++    #[serde(rename = "championName")]
++    pub champion_name: String,
++    pub puuid: String,
++}
++
++#[derive(Serialize)]
++pub struct PlayerReportPayload {
++    #[serde(rename = "gameId")]
++    pub game_id: u64,
++    pub categories: Vec<String>,
++    #[serde(rename = "offenderSummonerId")]
++    pub offender_summoner_id: u64,
++    #[serde(rename = "offenderPuuid")]
++    pub offender_puuid: String,
++}
++
++pub async fn get_friends_ids(remoting_client: &RESTClient) -> HashSet<u64> {
++    let response = remoting_client
++        .get("/lol-chat/v1/friends".to_string())
++        .await
++        .unwrap();
++
++    let friends = serde_json::from_value::<Vec<Friend>>(response).unwrap_or_default();
++    friends.into_iter().map(|f| f.summoner_id).collect()
++}
++
++pub async fn handle_end_game(
++    remoting_client: &RESTClient,
++    config: &Config,
++    app_handle: &AppHandle,
++    last_game_id: &mut Option<u64>,
++    friend_ids: &HashSet<u64>,
++) {
++    if !config.auto_report {
++        return;
++    }
++
++    let stats_value = match remoting_client
++        .get("/lol-end-of-game/v1/eog-stats-block".to_string())
++        .await
++    {
++        Ok(value) => value,
++        Err(err) => {
++            println!("Failed to fetch end of game stats: {:?}", err);
++            return;
++        }
++    };
++
++    let stats = match serde_json::from_value::<EndOfGameStats>(stats_value) {
++        Ok(stats) => stats,
++        Err(err) => {
++            println!("Failed to parse end of game stats: {:?}", err);
++            return;
++        }
++    };
++
++    if last_game_id.map(|id| id == stats.game_id).unwrap_or(false) {
++        return;
++    }
++
++    let current_player = stats.local_player.summoner_id;
++
++    for team in &stats.teams {
++        for player in &team.players {
++            handle_player_report(
++                remoting_client,
++                player,
++                stats.game_id,
++                current_player,
++                friend_ids,
++            )
++            .await;
++        }
++    }
++
++    *last_game_id = Some(stats.game_id);
++
++    if let Err(err) = app_handle.emit_all("end_game_reports_sent", stats.game_id) {
++        println!("Failed to emit end_game_reports_sent event: {:?}", err);
++    }
++}
++
++async fn handle_player_report(
++    remoting_client: &RESTClient,
++    player: &Player,
++    game_id: u64,
++    current_player_id: u64,
++    friend_ids: &HashSet<u64>,
++) {
++    if player.summoner_id == current_player_id {
++        return;
++    }
++
++    if friend_ids.contains(&player.summoner_id) {
++        return;
++    }
++
++    let payload = PlayerReportPayload {
++        game_id,
++        categories: vec![
++            "NEGATIVE_ATTITUDE".to_string(),
++            "VERBAL_ABUSE".to_string(),
++            "LEAVING_AFK".to_string(),
++            "ASSISTING_ENEMY_TEAM".to_string(),
++            "HATE_SPEECH".to_string(),
++            "THIRD_PARTY_TOOLS".to_string(),
++            "INAPPROPRIATE_NAME".to_string(),
++        ],
++        offender_summoner_id: player.summoner_id,
++        offender_puuid: player.puuid.clone(),
++    };
++
++    let _ = remoting_client
++        .post(
++            "/lol-player-report-sender/v1/end-of-game-reports".to_string(),
++            serde_json::to_value(payload).unwrap(),
++        )
++        .await;
++}
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+index a35575a..9d25b42 100644
+--- a/src-tauri/src/main.rs
++++ b/src-tauri/src/main.rs
+@@ -4,6 +4,7 @@
+ mod analytics;
+ mod champ_select;
+ mod commands;
++mod end_game;
+ mod lobby;
+ mod region;
+ mod state;
+@@ -11,6 +12,7 @@ mod summoner;
+ mod utils;
+ 
+ use crate::champ_select::ChampSelectSession;
++use crate::end_game::get_friends_ids;
+ use crate::lobby::Lobby;
+ use crate::region::RegionInfo;
+ use crate::utils::display_champ_select;
+@@ -27,6 +29,7 @@ use shaco::rest::RESTClient;
+ use shaco::utils::process_info;
+ use shaco::ws::LcuWebsocketClient;
+ use shaco::{model::ws::LcuSubscriptionType::JsonApiEvent, rest::LCUClientInfo};
++use std::collections::HashSet;
+ use std::time::Duration;
+ use tauri::{AppHandle, Manager};
+ use tokio::sync::Mutex;
+@@ -47,6 +50,14 @@ pub struct DodgeState {
+ 
+ struct AppConfig(Mutex<Config>);
+ 
++struct EndGameState(Mutex<EndGameData>);
++
++pub struct EndGameData {
++    pub last_game_id: Option<u64>,
++    pub friend_ids: HashSet<u64>,
++    pub friends_loaded: bool,
++}
++
+ #[derive(Serialize, Deserialize, Clone, Debug)]
+ #[serde(rename_all = "camelCase")]
+ struct Config {
+@@ -55,6 +66,8 @@ struct Config {
+     pub accept_delay: u32,
+     #[serde(default = "default_provider")]
+     pub multi_provider: String,
++    #[serde(default)]
++    pub auto_report: bool,
+ }
+ 
+ fn default_provider() -> String {
+@@ -71,6 +84,11 @@ fn main() {
+             last_dodge: None,
+             enabled: None,
+         })))
++        .manage(EndGameState(Mutex::new(EndGameData {
++            last_game_id: None,
++            friend_ids: HashSet::new(),
++            friends_loaded: false,
++        })))
+         .setup(|app| {
+             let app_handle = app.handle();
+             let cfg_folder = app.path_resolver().app_config_dir().unwrap();
+@@ -85,6 +103,7 @@ fn main() {
+                     auto_accept: false,
+                     accept_delay: 2000,
+                     multi_provider: "opgg".to_string(),
++                    auto_report: false,
+                 };
+ 
+                 let cfg_json = serde_json::to_string(&cfg).unwrap();
+@@ -105,6 +124,11 @@ fn main() {
+                             println!("Waiting for League Client to open...");
+                             connected = false;
+                             app_handle.emit_all("lcu_state_update", false).unwrap();
++                            let end_game_state = app_handle.state::<EndGameState>();
++                            let mut end_game_state = end_game_state.0.lock().await;
++                            end_game_state.last_game_id = None;
++                            end_game_state.friend_ids.clear();
++                            end_game_state.friends_loaded = false;
+                         }
+ 
+                         tokio::time::sleep(Duration::from_secs(2)).await;
+@@ -129,6 +153,17 @@ fn main() {
+ 
+                     drop(lcu);
+ 
++                    let cloned_remoting = remoting_client.clone();
++                    let cloned_app_handle = app_handle.clone();
++                    tauri::async_runtime::spawn(async move {
++                        tokio::time::sleep(Duration::from_secs(3)).await;
++                        let friend_ids = get_friends_ids(&cloned_remoting).await;
++                        let end_game_state = cloned_app_handle.state::<EndGameState>();
++                        let mut end_game_state = end_game_state.0.lock().await;
++                        end_game_state.friend_ids = friend_ids;
++                        end_game_state.friends_loaded = true;
++                    });
++
+                     // The websocket event API will not be opened until a few seconds after the client is opened.
+                     let mut ws = match LcuWebsocketClient::connect().await {
+                         Ok(ws) => ws,
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+index b588821..3b8b231 100644
+--- a/src-tauri/src/state.rs
++++ b/src-tauri/src/state.rs
+@@ -1,4 +1,6 @@
+-use crate::{champ_select::handle_champ_select_start, AppConfig};
++use crate::{
++    champ_select::handle_champ_select_start, end_game::handle_end_game, AppConfig, EndGameState,
++};
+ use shaco::rest::RESTClient;
+ use tauri::{AppHandle, Manager};
+ 
+@@ -55,6 +57,39 @@ pub async fn handle_client_state(
+                     .await;
+             }
+         }
++        "PreEndOfGame" | "EndOfGame" => {
++            let cloned_app_handle = app_handle.clone();
++            let cloned_remoting = remoting_client.clone();
++
++            tauri::async_runtime::spawn(async move {
++                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
++
++                let end_game_state = cloned_app_handle.state::<EndGameState>();
++                let friends_loaded = {
++                    let state = end_game_state.0.lock().await;
++                    state.friends_loaded
++                };
++
++                if !friends_loaded {
++                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
++                }
++
++                let cfg = cloned_app_handle.state::<AppConfig>();
++                let cfg = cfg.0.lock().await;
++
++                let end_game_state = cloned_app_handle.state::<EndGameState>();
++                let mut end_game_data = end_game_state.0.lock().await;
++
++                handle_end_game(
++                    &cloned_remoting,
++                    &cfg,
++                    &cloned_app_handle,
++                    &mut end_game_data.last_game_id,
++                    &end_game_data.friend_ids,
++                )
++                .await;
++            });
++        }
+         _ => {}
+     }
+ 
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+index e7e0ddf..0b5ab5d 100644
+--- a/src/lib/components/tool.svelte
++++ b/src/lib/components/tool.svelte
+@@ -93,6 +93,18 @@
+         />
+         <Label for="auto-accept">Auto Accept</Label>
+       </div>
++      <div class="flex items-center space-x-2">
++        <Switch
++          checked={config?.autoReport}
++          id="auto-report"
++          onCheckedChange={(v) => {
++            if (!config) return;
++            config.autoReport = v;
++            updateConfig(config);
++          }}
++        />
++        <Label for="auto-report">Auto Report</Label>
++      </div>
+     </div>
+   </div>
+   <div class="grid grid-cols-2 text-sm">
+@@ -152,6 +164,14 @@
+     </div>
+   {:else if state === "InProgress"}
+     <div in:fade class="flex gap-2 items-center animate-pulse">In Game</div>
++  {:else if state === "PreEndOfGame" || state === "EndOfGame"}
++    <div in:fade class="flex gap-2 items-center">
++      {#if config?.autoReport}
++        <span class="animate-pulse">Processing Reports...</span>
++      {:else}
++        <span>Game Ended</span>
++      {/if}
++    </div>
+   {:else if !connected}
+     <div in:fade class="flex gap-2 items-center animate-pulse">
+       Trying to find League Client...
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+index dea3460..927e9ce 100644
+--- a/src/lib/config.ts
++++ b/src/lib/config.ts
+@@ -4,7 +4,8 @@ export interface Config {
+     autoOpen: boolean;
+     autoAccept: boolean;
+     acceptDelay: number;
+-    multiProvider: string
++    multiProvider: string;
++    autoReport: boolean;
+ }
+ 
+ export async function updateConfig(config: Config) {

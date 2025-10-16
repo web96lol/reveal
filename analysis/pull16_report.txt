@@ -1,0 +1,6 @@
+Unable to locate any git diffs for pull request 16.
+Attempts made:
+- git fetch origin (HTTP 403)
+- git ls-remote https://github.com/steele123/reveal.git (HTTP 403)
+- curl https://patch-diff.githubusercontent.com/raw/steele123/reveal/pull/16.diff (Not Found)
+Because no diffs were retrievable, it was not possible to determine whether any candidate changes implement an auto report button.

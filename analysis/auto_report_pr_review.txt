@@ -1,0 +1,74 @@
+PR #1 – Move auto-report trigger into websocket handler
+- Backend wires a new `reporting` module that caches friend IDs, tracks the last reported game, and fires `/lol-player-report-sender/v1/end-of-game-reports` when the websocket delivers `PreEndOfGame`/`EndOfGame` events, using the app REST client for summoner lookups and friend fetches. (analysis/pr_diffs/pr1.diff)
+- `Config` and the Tauri state gain an `auto_report` flag and mutex-managed state, while the Svelte tool adds a persistent “Auto-report teammates after game” switch that calls `updateConfig`. (analysis/pr_diffs/pr1.diff)
+- Assessment: **Works** – the toggle guards the handler, teammates/friends are filtered, and reporting executes automatically after each match.
+
+PR #2 – Add post-game non-friend reporting automation
+- Introduces a `post_game` module that gathers end-of-game stats via the remoting client, filters out the local summoner and cached friends, sends friend requests, and posts offenders in bulk while returning a per-player summary. (analysis/pr_diffs/pr2.diff)
+- `state::handle_client_state` spawns the processor when the client enters `EndOfGame` and the new `autoReportNonFriends` switch is enabled; the UI also exposes a manual “Process Last Game” button that invokes the Tauri command. (analysis/pr_diffs/pr2.diff)
+- Assessment: **Works** – both the backend command and automatic path submit reports for non-friends and surface results to the UI.
+
+PR #3 – Add post-game non-friend reporting automation (refined)
+- Refactors the `post_game` module to drop friend-request side effects, populate Riot’s report categories, and return only report-focused summaries while retaining the cached friend filter. (analysis/pr_diffs/pr3.diff)
+- Keeps the `autoReportNonFriends` toggle and manual processing button so either the event-driven or manual flow can emit reports. (analysis/pr_diffs/pr3.diff)
+- Assessment: **Works** – the streamlined module still auto-reports eligible teammates once the toggle is on.
+
+PR #4 – Add automatic end-of-game reporting toggle
+- Adds a dedicated `reports` module that records the pending game ID during `PreEndOfGame`, fetches `/lol-end-of-game/v1/eog-stats-block` plus `/lol-chat/v1/friends`, skips the local player and friends, and sends batched report payloads when `auto_report` is true. (analysis/pr_diffs/pr4.diff)
+- The tool UI introduces an “Auto Report” switch tied to the shared config, mirroring `auto_open` and `auto_accept`. (analysis/pr_diffs/pr4.diff)
+- Assessment: **Works with caveats** – it successfully wires the toggle and reporting loop, but heavy `.unwrap()` calls mean failures would crash the task.
+
+PR #5 – Add end-of-game auto report pipeline
+- Implements an `end_of_game` module that dedupes games, loads friend IDs, reports each teammate with status tracking, and emits an `end_of_game_processed` event with per-player outcomes. (analysis/pr_diffs/pr5.diff)
+- Frontend consumes the event to show the report summary panel when `autoReport` is enabled, and backend scheduling runs on both `PreEndOfGame` and `EndOfGame` states. (analysis/pr_diffs/pr5.diff)
+- Assessment: **Works** – provides a complete toggle-controlled automation plus UI feedback.
+
+PR #6 – feat: add auto report automation
+- Documents the concurrency model and adds an `end_of_game` handler that retries stats collection up to ten times, caches friend IDs, and updates managed post-game state to prevent double-reporting. (analysis/pr_diffs/pr6.diff)
+- `state.rs` clones the config when post-game phases arrive and spawns the handler only if `autoReport` is true; the Svelte switch persists the flag exactly like the other automations. (analysis/pr_diffs/pr6.diff)
+- Assessment: **Works** – resilient retry logic and managed state keep auto-reporting reliable behind the toggle.
+
+PR #7 – Add post-game non-friend reporting automation (prompt guidance)
+- Only updates prompt and agent guidance files without touching runtime code or UI. (analysis/pr_diffs/pr7.diff)
+- Assessment: **Does not implement the button** – no product code changes were made.
+
+PR #8 – Clarify auto-report plan alignment with existing flow
+- Adds repository guidance and an `auto_report` implementation plan but does not modify application code. (analysis/pr_diffs/pr8.diff)
+- Assessment: **Does not implement the button** – documentation only.
+
+PR #9 – Clarify report payload parity in plan
+- Extends the plan docs and simultaneously introduces an `end_of_game` module, config toggle, and Svelte switch mirroring the champ-select automation to run auto reports when enabled. (analysis/pr_diffs/pr9.diff)
+- Assessment: **Works** – despite the large doc payload, the runtime code adds a functional toggle and handler.
+
+PR #10 – Add end-of-game auto report toggle
+- Creates a comprehensive `end_game` module with managed state reset, friend caching, and per-target reporting, invoked from `state.rs` whenever `auto_report` is enabled. (analysis/pr_diffs/pr10.diff)
+- Startup resets the state on disconnect, and the UI switch persists the flag just like auto-open/accept. (analysis/pr_diffs/pr10.diff)
+- Assessment: **Works** – the automation runs through the new module and respects the toggle.
+
+PR #11 – Restrict end-of-game auto reporting to teammates
+- Narrows the earlier `end_of_game` logic so only the local player’s team is considered before submitting reports. (analysis/pr_diffs/pr11.diff)
+- Assessment: **Works** – refinement keeps the existing auto-report button functional while preventing cross-team reports.
+
+PR #12 – Normalize end-of-game naming (draft)
+- Bundles documentation with code that renames the end-of-game module, emits UI events, and keeps the auto-report toggle plus teammate filtering. (analysis/pr_diffs/pr12.diff)
+- Assessment: **Works** – the automation remains intact with the naming cleanup.
+
+PR #13 – Normalize end-of-game naming (follow-up)
+- Similar to PR #12, carrying forward the end-of-game module, toggle checks, and UI switch while updating docs and prompts. (analysis/pr_diffs/pr13.diff)
+- Assessment: **Works** – maintains the functioning auto-report button and backend flow.
+
+PR #14 – Add auto report automation and UI toggle
+- Introduces an `end_game` module that records last handled game IDs, reads friend lists, and posts reports when `autoReport` is set, with the Svelte switch surfacing the toggle. (analysis/pr_diffs/pr14.diff)
+- Assessment: **Works** – complete backend/frontend wiring for the button.
+
+PR #15 – Remove analytics integrations and document agent workflow
+- Focuses on removing analytics plumbing and updating docs; it does not touch the auto-report toggle or handler. (analysis/pr_diffs/pr15.diff)
+- Assessment: **No change to the button** – unrelated cleanup.
+
+PR #16 – Add friend PUUID helpers for summoner module
+- Refactors champ-select to use the app client for summoner fetches, introduces an `end_game` module with cached friend PUUIDs, and renders the auto-report switch plus optional extra UI when enabled. (analysis/pr_diffs/pr16.diff)
+- Assessment: **Works** – the toggle persists and the backend auto-reports teammates while skipping friends.
+
+PR #17 – Remove analytics integrations
+- Removes analytics calls and tweaks UI components without altering the auto-report logic. (analysis/pr_diffs/pr17.diff)
+- Assessment: **No impact on the button** – unrelated refactor.

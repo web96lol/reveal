@@ -1,0 +1,615 @@
+diff --git a/docs/auto-open-auto-accept.md b/docs/auto-open-auto-accept.md
+new file mode 100644
+index 0000000..9369a61
+--- /dev/null
++++ b/docs/auto-open-auto-accept.md
+@@ -0,0 +1,128 @@
++# Auto-Open and Auto-Accept Data Flow
++
++This document describes how Reveal's auto-open and auto-accept toggles move from the
++Svelte front end through the Tauri backend, and how the resulting state drives
++League Client interactions. It also outlines how the same architecture could be
++ported to a C# desktop application without modifying the shared `shaco` library.
++
++## Shared Configuration Lifecycle
++
++1. **UI bootstraps configuration** – When `reveal.svelte` mounts it wires up
++   listeners for `client_state_update`, `lcu_state_update`, and
++   `champ_select_started` before invoking the `app_ready` command. The resolved
++   `Config` struct populates local component state so every toggle reflects the
++   persisted backend values.【F:src/reveal.svelte†L1-L53】
++2. **Config shape parity** – The TypeScript `Config` interface mirrors the Rust
++   struct (camelCase vs. snake_case handled by Serde). Both carry the `autoOpen`,
++   `autoAccept`, `acceptDelay`, and `multiProvider` fields so the UI can operate
++   on a single object graph.【F:src/lib/config.ts†L1-L13】【F:src-tauri/src/main.rs†L41-L55】
++3. **Updates flow through `updateConfig`** – Every UI control mutates the shared
++   object and immediately calls `updateConfig`, which invokes the `set_config`
++   Tauri command with the new struct. The command replaces the managed state and
++   persists the JSON back to disk, ensuring that runtime consumers and the next
++   launch see the updated values.【F:src/lib/components/tool.svelte†L21-L73】【F:src-tauri/src/commands.rs†L1-L43】
++4. **Startup seeding** – During `main` startup the backend ensures a
++   `config.json` exists (defaulting `auto_open = true`, `auto_accept = false`,
++   `accept_delay = 2000`). It then loads the JSON into an `AppConfig` state so
++   every command and event handler receives the same snapshot without repeating
++   disk IO.【F:src-tauri/src/main.rs†L57-L105】
++
++Because `Config` lives in the crate root, child modules like `commands` and
++`champ_select` can import it without marking the struct `pub`. Rust privacy rules
++let children access their parent module's private items, so only the fields need
++`pub` to support serde serialization.【F:src-tauri/src/main.rs†L41-L55】【F:src-tauri/src/commands.rs†L1-L30】
++
++## Gameflow Monitoring Pipeline
++
++The backend spawns a long-lived async task that continually searches for the
++League lockfile, constructs REST clients, and subscribes a websocket connection
++once the client is available. Subscriptions include both `/lol-gameflow/v1/gameflow-phase`
++and `/lol-champ-select/v1/session`, feeding all subsequent state transitions into
++`handle_client_state`. Initial and subsequent phases are also broadcast back to
++Svelte via `client_state_update`, while champ select payloads go through
++`champ_select_started` so the UI can render team members.【F:src-tauri/src/main.rs†L69-L193】【F:src-tauri/src/state.rs†L1-L47】
++
++## Auto-Open Execution Path
++
++1. **Phase detection** – When `handle_client_state` sees the `ChampSelect` phase
++   it clones the REST handles and schedules a task five seconds in the future.
++   The delay lets Riot's champion select APIs stabilize before the next step and
++   ensures the code reads the latest configuration snapshot before acting.【F:src-tauri/src/state.rs†L16-L35】
++2. **Roster and region fetch** – `handle_champ_select_start` retrieves the lobby
++   participants via `/chat/v5/participants`, filters out non champ-select
++   entries, and loads region metadata from `/riotclient/region-locale`. The team
++   is emitted to the UI, which updates the roster view and manual open button.
++   【F:src-tauri/src/champ_select.rs†L1-L71】【F:src-tauri/src/lobby.rs†L1-L40】
++3. **Provider launch** – If `config.auto_open` remains true, the helper formats a
++   multi-search URL using the selected provider and opens it with the OS
++   default handler. Special cases like `SG2` -> `SG` are normalized before the
++   URL is built.【F:src-tauri/src/champ_select.rs†L72-L96】【F:src-tauri/src/utils.rs†L1-L73】
++4. **Shared analytics** – The same function also fetches the active summoner and
++   forwards analytics alongside the roster, demonstrating how auto-open shares
++   its data fetching with other champ-select side effects.【F:src-tauri/src/champ_select.rs†L96-L99】
++
++## Auto-Accept Execution Path
++
++1. **Ready check detection** – A transition to `ReadyCheck` prompts
++   `handle_client_state` to lock the `AppConfig` and inspect `auto_accept`.
++   【F:src-tauri/src/state.rs†L35-L47】
++2. **Delay handling** – When enabled, the handler sleeps for `accept_delay - 1000`
++   milliseconds, mimicking a human response while giving users a small window to
++   cancel by toggling the switch off. Because the config is read immediately
++   before the sleep, any UI change propagates to the next ready check.
++   【F:src-tauri/src/state.rs†L35-L47】
++3. **REST acknowledgement** – After the delay the function posts an empty body to
++   `/lol-matchmaking/v1/ready-check/accept`. If auto-accept is disabled (or the
++   delay elapses and the user cancels beforehand) the call is skipped, allowing
++   manual interaction.【F:src-tauri/src/state.rs†L35-L47】
++
++The front end keeps users informed by showing the live gameflow state, champ
++select rosters, and connection status. Manual overrides (e.g., the "Open Multi
++Link" button) reuse the same REST and configuration helpers, so manual and
++automatic workflows stay consistent.【F:src/lib/components/tool.svelte†L21-L130】【F:src-tauri/src/commands.rs†L45-L79】
++
++## Extending the Flow to Auto-Report
++
++Reveal's architecture makes it easy to bolt on additional automated actions,
++like an auto-report flow:
++
++1. **Capture the trigger** – Subscribe to the `/lol-gameflow/v1/gameflow-phase`
++   transition into `PostGame` (or use an existing subscription) and branch on the
++   new phase inside `handle_client_state`.
++2. **Fetch the required data** – Use the same REST clients to retrieve the
++   post-game scoreboard and current summoner identity.
++3. **Honor shared configuration** – Extend the `Config` struct with
++   `auto_report` flags and add matching UI toggles that use `updateConfig`.
++4. **Execute the side effect** – POST the desired report payload to Riot's
++   endpoint, respecting any delay or confirmation logic encoded in the config.
++
++Because `AppConfig` and the websocket loop already exist, only the trigger and
++handler need to be implemented, and the front end instantly gains new controls
++through the shared config lifecycle.
++
++## Porting the Pattern to C#
++
++To replicate this behavior in a C# desktop application without modifying the
++`shaco` Rust crate, you can:
++
++1. **Expose a thin FFI layer** – Keep the Rust backend (with `shaco`) as a Tauri
++   or standalone service that communicates over an IPC channel (e.g., WebSocket,
++   HTTP, or a message queue). The C# UI would send the same config payloads and
++   listen for the same events.
++2. **Mirror the configuration contract** – Define a C# `Config` class matching
++   the Rust/TypeScript shape and serialize it when calling the existing `set_config`
++   handler. The Rust side retains ownership of disk persistence and Riot API
++   calls, so no changes to `shaco` are necessary.
++3. **Reuse event semantics** – Have the C# layer subscribe to the emitted
++   `client_state_update`, `lcu_state_update`, and `champ_select_started` events
++   (transported over the chosen IPC). UI buttons toggle booleans that flow to the
++   Rust backend, and the backend keeps posting ready-check accepts or opening
++   URLs exactly as before.
++4. **Optional native REST/WebSocket** – If you must run everything in C#, use the
++   documented REST endpoints and websocket subscriptions as a reference model.
++   The same state machine applies: watch for gameflow transitions, use the lockfile
++   credentials, delay when necessary, and honour the persisted configuration.
++
++This separation keeps the reliable Rust implementation and `shaco` bindings in
++place while allowing a C# shell to present the controls and status indicators in
++an environment familiar to .NET teams.
+diff --git a/docs/auto-report-approaches.md b/docs/auto-report-approaches.md
+new file mode 100644
+index 0000000..43682f9
+--- /dev/null
++++ b/docs/auto-report-approaches.md
+@@ -0,0 +1,51 @@
++# Auto-Report Implementation Approaches
++
++Reveal already exposes auto-open and auto-accept through a shared configuration
++model and a set of focused backend handlers. Extending that architecture for
++auto-reporting can follow two viable paths depending on how much you want to
++reshape the existing control flow.
++
++## Option A – Incremental Alignment
++
++This approach mirrors the existing toggles with minimal churn:
++
++- Reuse the gameflow dispatcher to trigger a post-game worker exactly once per
++  match. The current implementation does this from `handle_client_state`,
++  spawning a task whenever the phase enters an end-of-game value so that the
++  heavy lifting runs off the websocket hot path.【F:src-tauri/src/state.rs†L20-L70】
++- Centralise the post-game behaviour inside `handle_end_of_game_phase`, which
++  collects the scoreboard, filters out the local summoner and friends, and sends
++  one report per remaining player. Error paths log concise status messages so
++  they read like the rest of the backend modules.【F:src-tauri/src/end_of_game.rs†L7-L130】
++- Persist simple "already handled" state alongside the other managed mutexes in
++  `main.rs`, preventing duplicate submissions if Riot emits multiple end-game
++  phases for the same match.【F:src-tauri/src/main.rs†L49-L85】
++
++The result fits neatly beside auto-open/auto-accept without additional surface
++area: configuration stays in `AppConfig`, UI toggles flow through `updateConfig`,
++while all Riot REST calls remain isolated in the dedicated helper module.
++
++## Option B – Full Modular Parity
++
++If you want perfect symmetry with the other automation toggles, you can push the
++separation a bit further:
++
++1. Introduce a `post_game` module that mirrors the layout of `champ_select`—one
++   public entry point that emits UI events, runs analytics, and (optionally)
++   fires reports. The `champ_select` module shows the pattern to follow: it
++   fetches lobby participants, emits a front-end update, and conditionally opens
++   a browser based on the live configuration.【F:src-tauri/src/champ_select.rs†L1-L104】
++2. Extend the UI event surface with a `post_game_reported` payload so the Svelte
++   layer can render feedback (e.g., which players were reported) the same way it
++   already reflects champ-select updates.【F:src/lib/components/tool.svelte†L21-L130】
++3. Split configuration concerns by adding any new post-game delays or filters to
++   `Config`, persisting them through the same `set_config` command that handles
++   the existing toggles.【F:src-tauri/src/commands.rs†L1-L64】
++4. If analytics or history views are desired, chain them from the new module so
++   they share the fetched `EogStatsBlock` payload, keeping outbound requests
++   coalesced just like `handle_champ_select_start` bundles URL launches and
++   analytics submissions.【F:src-tauri/src/champ_select.rs†L72-L104】
++
++Option B demands a bit more plumbing (extra events and optional UI) but yields a
++layout identical to the other automation flows, which may help future
++contributors discover and extend the feature set.
+diff --git a/docs/auto-report-state-flow.md b/docs/auto-report-state-flow.md
+new file mode 100644
+index 0000000..05cd85d
+--- /dev/null
++++ b/docs/auto-report-state-flow.md
+@@ -0,0 +1,40 @@
++# Auto-report Shared State & Mutex Usage
++
++This note explains how the auto-report toggle shares the same concurrency model as the existing auto-open and auto-accept automations, and why the `tokio::sync::Mutex` guarding `AppConfig` is sufficient for coordinating configuration reads across async tasks.
++
++## Managed state registrations
++
++`main.rs` registers three pieces of managed state with Tauri: `LCU`, `ManagedDodgeState`, and `AppConfig`. Each wrapper is a tuple struct over a `tokio::sync::Mutex`, so all async consumers share a single instance while getting `Send + Sync` access:
++
++```rust
++struct AppConfig(Mutex<Config>);
++```
++
++Because child modules can access their parent's private items, `Config` itself does not need to be `pub`; the fields are public so commands can serialize them, mirroring how the auto-open and auto-accept flags have always been exposed.
++
++## Configuration lifecycle
++
++During startup the app seeds `config.json`, loads it into `Config`, and manages it through `AppConfig(Mutex::new(cfg))`. Any command (for example, `set_config`) or event handler (`handle_client_state`) accesses the current values by acquiring the async mutex:
++
++```rust
++let cfg_state = app_handle.state::<AppConfig>();
++let mut cfg = cfg_state.0.lock().await;
++```
++
++The lock lives only for the scope where the configuration is needed. Once the guard drops, other tasks—such as a simultaneous ready-check accept or a UI-driven `set_config`—can acquire the mutex.
++
++## Gameflow dispatching
++
++`state::handle_client_state` owns the fan-out from websocket events. Every branch that requires configuration data follows the same pattern:
++
++* **Champ Select:** clone the `AppHandle` and REST clients, spawn a task, sleep five seconds, then lock `AppConfig` to drive `handle_champ_select_start`. This mirrors the original auto-open implementation.
++* **Ready Check:** lock `AppConfig`, check `auto_accept`, and, if enabled, delay for `accept_delay - 1000` before posting to the accept endpoint—unchanged from the pre-auto-report code.
++* **Post-game phases:** read and clone the config before spawning a background task. The task reuses that snapshot to attempt the end-of-game workflow up to ten times (with two-second gaps) until the stats endpoint becomes available, mirroring the persistence of the legacy C# loop without holding the mutex across awaits.
++
++Because each branch only holds the lock while reading config (and clones the data when longer-lived ownership is required), there is no risk of the mutex being held across awaits that would deadlock other tasks. The spawned post-game task, for example, clones the `Config` so that report submission does not need to keep the mutex guard alive.
++
++## Relationship to the C# reference
++
++The original C# reference code performed all logic on a single thread without explicit locking. In Rust/Tauri, the async runtime introduces concurrent tasks (websocket listener, UI commands), so the `tokio::Mutex` ensures only one mutable borrow of the shared config exists at a time. This pattern is the same one that has safely powered auto-open and auto-accept since the project's inception.
++
++In short, the auto-report flow leverages the same `AppHandle` accessors and mutex-guarded configuration as the existing automations, so its state handling is consistent with, and no more complex than, auto-open/auto-accept.
+diff --git a/docs/auto-report-vs-csharp.md b/docs/auto-report-vs-csharp.md
+new file mode 100644
+index 0000000..53a888a
+--- /dev/null
++++ b/docs/auto-report-vs-csharp.md
+@@ -0,0 +1,24 @@
++# Auto-Report Implementation Status
++
++This note compares the current Rust implementation to the legacy C# tool and explains what would happen if the auto-report feature were removed again.
++
++## Does the current code work?
++
++The backend only runs the automation when the stored configuration enables `auto_report`, matching the guard the C# script performed manually. It fetches the post-game stats, skips the current player and any friends, and submits the same seven report categories that the C# prototype hard-coded, all through Riot's official LCU REST endpoints.【F:src-tauri/src/end_of_game.rs†L7-L128】 When the report succeeds the log mirrors the legacy console output, and any failures are surfaced without crashing the Tauri process.【F:src-tauri/src/end_of_game.rs†L105-L127】
++
++The workflow is wired into the same gameflow dispatcher that already handles auto-open and auto-accept. As soon as the client enters a post-game phase, the handler clones the latest configuration and REST client and offloads the reporting logic onto the async runtime so it does not block websocket processing.【F:src-tauri/src/state.rs†L20-L70】 Because the configuration is managed state in `main.rs`, the toggle in the UI and the backend logic stay in sync just like the existing booleans.【F:src-tauri/src/main.rs†L49-L109】【F:src/lib/components/tool.svelte†L72-L107】【F:src/lib/config.ts†L1-L15】
++
++## What if we revert to the old code?
++
++Removing the Rust auto-report module would simply restore the previous behaviour—auto-open and auto-accept would keep working because their data flow and configuration fields are untouched. The only regression would be the loss of end-of-game automation (no more reports or friend/current-player filtering), effectively matching the state before the feature landed. Since the new code does not patch the shared `shaco` client or alter the ready-check/champ-select handlers, reverting it would not introduce instability beyond disabling this single toggle.
++
++## Parity with the C# version
++
++The Rust implementation follows the same milestones as the C# sample:
++
++- Watches for the end-of-game phase before attempting to pull the stats payload.【F:src-tauri/src/state.rs†L62-L70】
++- Reads `/lol-end-of-game/v1/eog-stats-block` to discover the players in the match, along with their IDs, names, and champion picks.【F:src-tauri/src/end_of_game.rs†L60-L124】
++- Filters out the local account and any summoners on the friend list, just like the `foundFriends` short-circuit in the original console app.【F:src-tauri/src/end_of_game.rs†L69-L127】
++- Posts the hard-coded category array to `/lol-player-report-sender/v1/end-of-game-reports` so every teammate receives the full set of reasons the prototype sent.【F:src-tauri/src/end_of_game.rs†L7-L115】
++
++Because it reuses the same managed configuration, REST wrapper, and websocket session that power the other toggles, the Rust port remains stable and ready to extend—no additional library changes were required.
+diff --git a/src-tauri/src/end_of_game.rs b/src-tauri/src/end_of_game.rs
+new file mode 100644
+index 0000000..d58c02c
+--- /dev/null
++++ b/src-tauri/src/end_of_game.rs
+@@ -0,0 +1,187 @@
++use crate::{Config, ManagedPostGameState};
++use serde::Deserialize;
++use shaco::rest::RESTClient;
++use std::collections::HashSet;
++use tauri::{AppHandle, Manager};
++
++const REPORT_CATEGORIES: [&str; 7] = [
++    "NEGATIVE_ATTITUDE",
++    "VERBAL_ABUSE",
++    "LEAVING_AFK",
++    "ASSISTING_ENEMY_TEAM",
++    "HATE_SPEECH",
++    "THIRD_PARTY_TOOLS",
++    "INAPPROPRIATE_NAME",
++];
++
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct EogStatsBlock {
++    #[serde(rename = "gameId")]
++    game_id: u64,
++    local_player: EogPlayer,
++    teams: Vec<EogTeam>,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct EogTeam {
++    players: Vec<EogPlayer>,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct EogPlayer {
++    #[serde(rename = "summonerId")]
++    summoner_id: u64,
++    puuid: String,
++    #[serde(rename = "summonerName")]
++    summoner_name: String,
++    #[serde(default)]
++    champion_name: Option<String>,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct FriendEntry {
++    #[serde(rename = "summonerId")]
++    summoner_id: Option<u64>,
++}
++
++pub async fn handle_end_of_game_phase(
++    app_handle: &AppHandle,
++    app_client: &RESTClient,
++    config: &Config,
++) -> bool {
++    if !config.auto_report {
++        return true;
++    }
++
++    let Some(stats) = fetch_eog_stats(app_client).await else {
++        return false;
++    };
++
++    if !mark_game_if_new(app_handle, stats.game_id).await {
++        println!("Post game already handled for {}", stats.game_id);
++        return true;
++    }
++
++    let game_id = stats.game_id;
++    let my_id = stats.local_player.summoner_id;
++    let teams = stats.teams;
++
++    let friend_ids = fetch_friend_ids(app_client).await.unwrap_or_default();
++    let mut reported_count = 0u32;
++
++    for team in teams {
++        for player in team.players {
++            if player.summoner_id == my_id {
++                println!(
++                    "Skipping auto report for {} ({}) — current account",
++                    player.summoner_name,
++                    player
++                        .champion_name
++                        .as_deref()
++                        .unwrap_or("Unknown Champion"),
++                );
++                continue;
++            }
++
++            if friend_ids.contains(&player.summoner_id) {
++                println!(
++                    "Skipping auto report for {} ({}) — marked as friend",
++                    player.summoner_name,
++                    player
++                        .champion_name
++                        .as_deref()
++                        .unwrap_or("Unknown Champion"),
++                );
++                continue;
++            }
++
++            let body = serde_json::json!({
++                "gameId": game_id,
++                "categories": REPORT_CATEGORIES,
++                "offenderSummonerId": player.summoner_id,
++                "offenderPuuid": player.puuid,
++            });
++
++            if let Err(err) = app_client
++                .post(
++                    "/lol-player-report-sender/v1/end-of-game-reports".to_string(),
++                    body,
++                )
++                .await
++            {
++                println!("Unable to auto report {}: {:?}", player.summoner_name, err);
++                continue;
++            }
++
++            println!(
++                "Auto reported {} ({})",
++                player.summoner_name,
++                player
++                    .champion_name
++                    .as_deref()
++                    .unwrap_or("Unknown Champion"),
++            );
++            reported_count += 1;
++        }
++    }
++
++    println!(
++        "Auto-report session complete for game {} — reported {} players",
++        game_id, reported_count
++    );
++
++    true
++}
++
++async fn fetch_eog_stats(app_client: &RESTClient) -> Option<EogStatsBlock> {
++    let raw_stats = match app_client
++        .get("/lol-end-of-game/v1/eog-stats-block".to_string())
++        .await
++    {
++        Ok(value) => value,
++        Err(err) => {
++            println!("Unable to read end of game stats: {:?}", err);
++            return None;
++        }
++    };
++
++    match serde_json::from_value(raw_stats) {
++        Ok(stats) => Some(stats),
++        Err(err) => {
++            println!("Unable to parse end of game stats: {:?}", err);
++            None
++        }
++    }
++}
++
++async fn fetch_friend_ids(app_client: &RESTClient) -> Option<HashSet<u64>> {
++    let raw_friends = app_client
++        .get("/lol-chat/v1/friends".to_string())
++        .await
++        .ok()?;
++
++    let entries: Vec<FriendEntry> = serde_json::from_value(raw_friends).ok()?;
++
++    let ids = entries
++        .into_iter()
++        .filter_map(|entry| entry.summoner_id)
++        .collect::<HashSet<u64>>();
++
++    Some(ids)
++}
++
++async fn mark_game_if_new(app_handle: &AppHandle, game_id: u64) -> bool {
++    let tracker = app_handle.state::<ManagedPostGameState>();
++    let mut tracker = tracker.0.lock().await;
++
++    if tracker.last_handled_game == Some(game_id) {
++        return false;
++    }
++
++    tracker.last_handled_game = Some(game_id);
++    true
++}
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+index a35575a..da5bb33 100644
+--- a/src-tauri/src/main.rs
++++ b/src-tauri/src/main.rs
+@@ -4,6 +4,7 @@
+ mod analytics;
+ mod champ_select;
+ mod commands;
++mod end_of_game;
+ mod lobby;
+ mod region;
+ mod state;
+@@ -45,6 +46,12 @@ pub struct DodgeState {
+     pub enabled: Option<u64>,
+ }
+ 
++struct ManagedPostGameState(Mutex<PostGameState>);
++
++pub struct PostGameState {
++    pub last_handled_game: Option<u64>,
++}
++
+ struct AppConfig(Mutex<Config>);
+ 
+ #[derive(Serialize, Deserialize, Clone, Debug)]
+@@ -55,6 +62,8 @@ struct Config {
+     pub accept_delay: u32,
+     #[serde(default = "default_provider")]
+     pub multi_provider: String,
++    #[serde(default)]
++    pub auto_report: bool,
+ }
+ 
+ fn default_provider() -> String {
+@@ -71,6 +80,9 @@ fn main() {
+             last_dodge: None,
+             enabled: None,
+         })))
++        .manage(ManagedPostGameState(Mutex::new(PostGameState {
++            last_handled_game: None,
++        })))
+         .setup(|app| {
+             let app_handle = app.handle();
+             let cfg_folder = app.path_resolver().app_config_dir().unwrap();
+@@ -85,6 +97,7 @@ fn main() {
+                     auto_accept: false,
+                     accept_delay: 2000,
+                     multi_provider: "opgg".to_string(),
++                    auto_report: false,
+                 };
+ 
+                 let cfg_json = serde_json::to_string(&cfg).unwrap();
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+index b588821..96faa4a 100644
+--- a/src-tauri/src/state.rs
++++ b/src-tauri/src/state.rs
+@@ -1,4 +1,6 @@
+-use crate::{champ_select::handle_champ_select_start, AppConfig};
++use crate::{
++    champ_select::handle_champ_select_start, end_of_game::handle_end_of_game_phase, AppConfig,
++};
+ use shaco::rest::RESTClient;
+ use tauri::{AppHandle, Manager};
+ 
+@@ -43,10 +45,8 @@ pub async fn handle_client_state(
+             let cfg = app_handle.state::<AppConfig>();
+             let cfg = cfg.0.lock().await;
+             if cfg.auto_accept {
+-                tokio::time::sleep(std::time::Duration::from_millis(
+-                    (cfg.accept_delay as u64) - 1000,
+-                ))
+-                .await;
++                let delay = cfg.accept_delay.saturating_sub(1000);
++                tokio::time::sleep(std::time::Duration::from_millis(delay as u64)).await;
+                 let _resp = remoting_client
+                     .post(
+                         "/lol-matchmaking/v1/ready-check/accept".to_string(),
+@@ -55,6 +55,40 @@ pub async fn handle_client_state(
+                     .await;
+             }
+         }
++        "WaitingForStats" | "PreEndOfGame" | "EndOfGame" => {
++            let cfg_state = app_handle.state::<AppConfig>();
++            let config = cfg_state.0.lock().await.clone();
++
++            if config.auto_report {
++                let cloned_handle = app_handle.clone();
++                let cloned_client = app_client.clone();
++
++                tauri::async_runtime::spawn(async move {
++                    let mut succeeded = false;
++
++                    for attempt in 1..=10 {
++                        if handle_end_of_game_phase(&cloned_handle, &cloned_client, &config).await {
++                            if attempt > 1 {
++                                println!(
++                                    "Auto-report finished after {} attempts during post game phase",
++                                    attempt
++                                );
++                            }
++                            succeeded = true;
++                            break;
++                        }
++
++                        if attempt < 10 {
++                            tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
++                        }
++                    }
++
++                    if !succeeded {
++                        println!("Auto-report failed to gather end of game stats after retries");
++                    }
++                });
++            }
++        }
+         _ => {}
+     }
+ 
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+index e7e0ddf..8700fae 100644
+--- a/src/lib/components/tool.svelte
++++ b/src/lib/components/tool.svelte
+@@ -93,6 +93,18 @@
+         />
+         <Label for="auto-accept">Auto Accept</Label>
+       </div>
++      <div class="flex items-center space-x-2">
++        <Switch
++          checked={config?.autoReport}
++          id="auto-report"
++          onCheckedChange={(v) => {
++            if (!config) return;
++            config.autoReport = v;
++            updateConfig(config);
++          }}
++        />
++        <Label for="auto-report">Auto Report</Label>
++      </div>
+     </div>
+   </div>
+   <div class="grid grid-cols-2 text-sm">
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+index dea3460..927e9ce 100644
+--- a/src/lib/config.ts
++++ b/src/lib/config.ts
+@@ -4,7 +4,8 @@ export interface Config {
+     autoOpen: boolean;
+     autoAccept: boolean;
+     acceptDelay: number;
+-    multiProvider: string
++    multiProvider: string;
++    autoReport: boolean;
+ }
+ 
+ export async function updateConfig(config: Config) {

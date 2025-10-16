@@ -1,0 +1,489 @@
+diff --git a/src-tauri/src/end_game.rs b/src-tauri/src/end_game.rs
+new file mode 100644
+index 0000000..c96c2af
+--- /dev/null
++++ b/src-tauri/src/end_game.rs
+@@ -0,0 +1,365 @@
++use anyhow::{anyhow, Context, Result};
++use serde::Serialize;
++use serde_json::Value;
++use shaco::rest::RESTClient;
++use std::collections::HashSet;
++use tokio::sync::Mutex;
++
++const REPORT_CATEGORIES: [&str; 7] = [
++    "NEGATIVE_ATTITUDE",
++    "VERBAL_ABUSE",
++    "LEAVING_AFK",
++    "ASSISTING_ENEMY_TEAM",
++    "HATE_SPEECH",
++    "THIRD_PARTY_TOOLS",
++    "INAPPROPRIATE_NAME",
++];
++
++#[derive(Default, Debug)]
++pub struct EndGameState {
++    pub last_game_id: Option<u64>,
++    pub local_summoner_id: Option<u64>,
++    pub friends_loaded: bool,
++    pub friend_ids: HashSet<u64>,
++}
++
++impl EndGameState {
++    pub fn reset(&mut self) {
++        self.last_game_id = None;
++        self.local_summoner_id = None;
++        self.friends_loaded = false;
++        self.friend_ids.clear();
++    }
++}
++
++pub struct ManagedEndGameState(pub Mutex<EndGameState>);
++
++impl Default for ManagedEndGameState {
++    fn default() -> Self {
++        Self(Mutex::new(EndGameState::default()))
++    }
++}
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct EndOfGameReportPayload {
++    game_id: u64,
++    categories: Vec<&'static str>,
++    offender_summoner_id: u64,
++    offender_puuid: String,
++}
++
++#[derive(Debug, PartialEq, Eq)]
++struct ReportTarget {
++    summoner_id: u64,
++    puuid: String,
++    summoner_name: Option<String>,
++}
++
++#[derive(Debug, PartialEq, Eq)]
++struct ProcessedGame {
++    game_id: u64,
++    targets: Vec<ReportTarget>,
++}
++
++pub async fn handle_end_of_game(state: &ManagedEndGameState, app_client: &RESTClient) {
++    if let Err(err) = process_end_of_game(state, app_client).await {
++        println!("End of game handler error: {}", err);
++    }
++}
++
++async fn process_end_of_game(state: &ManagedEndGameState, app_client: &RESTClient) -> Result<()> {
++    if needs_friend_refresh(state).await {
++        if let Err(err) = fetch_and_cache_friends(state, app_client).await {
++            println!("Failed to refresh friends list: {}", err);
++        }
++    }
++
++    if !friends_ready(state).await {
++        return Ok(());
++    }
++
++    let stats = app_client
++        .get("/lol-end-of-game/v1/eog-stats-block".to_string())
++        .await
++        .map_err(|err| anyhow!("failed to fetch end of game stats: {}", err))?;
++
++    let processed = {
++        let mut guard = state.0.lock().await;
++        match collect_report_targets(&mut guard, &stats)? {
++            Some(game) => game,
++            None => return Ok(()),
++        }
++    };
++
++    if processed.targets.is_empty() {
++        return Ok(());
++    }
++
++    for target in processed.targets {
++        let payload = EndOfGameReportPayload {
++            game_id: processed.game_id,
++            categories: REPORT_CATEGORIES.to_vec(),
++            offender_summoner_id: target.summoner_id,
++            offender_puuid: target.puuid.clone(),
++        };
++
++        let payload = match serde_json::to_value(&payload) {
++            Ok(value) => value,
++            Err(err) => {
++                println!(
++                    "Failed to encode auto report payload for {} in game {}: {}",
++                    target.summoner_id, processed.game_id, err
++                );
++                continue;
++            }
++        };
++
++        match app_client
++            .post(
++                "/lol-player-report-sender/v1/end-of-game-reports".to_string(),
++                payload,
++            )
++            .await
++        {
++            Ok(_) => {
++                let label = target
++                    .summoner_name
++                    .unwrap_or_else(|| target.summoner_id.to_string());
++                println!("Auto reported {} for game {}", label, processed.game_id);
++            }
++            Err(err) => {
++                println!(
++                    "Failed to auto report {} in game {}: {}",
++                    target.summoner_id, processed.game_id, err
++                );
++            }
++        }
++    }
++
++    Ok(())
++}
++
++async fn needs_friend_refresh(state: &ManagedEndGameState) -> bool {
++    let guard = state.0.lock().await;
++    !guard.friends_loaded
++}
++
++async fn friends_ready(state: &ManagedEndGameState) -> bool {
++    let guard = state.0.lock().await;
++    guard.friends_loaded
++}
++
++async fn fetch_and_cache_friends(
++    state: &ManagedEndGameState,
++    app_client: &RESTClient,
++) -> Result<()> {
++    let response = app_client
++        .get("/lol-chat/v1/friends".to_string())
++        .await
++        .map_err(|err| anyhow!("failed to fetch friends: {}", err))?;
++
++    let friends = response
++        .as_array()
++        .context("friends response is not an array")?;
++
++    let mut ids = HashSet::new();
++    for friend in friends {
++        if let Some(id_value) = friend.get("summonerId") {
++            if let Some(id) = parse_u64(id_value) {
++                ids.insert(id);
++            }
++        }
++    }
++
++    let mut guard = state.0.lock().await;
++    guard.friend_ids = ids;
++    guard.friends_loaded = true;
++    Ok(())
++}
++
++fn collect_report_targets(
++    state: &mut EndGameState,
++    stats: &Value,
++) -> Result<Option<ProcessedGame>> {
++    let game_id = stats
++        .get("gameId")
++        .and_then(parse_u64)
++        .context("missing gameId in stats")?;
++
++    if let Some(last_game) = state.last_game_id {
++        if last_game == game_id {
++            return Ok(None);
++        }
++    }
++
++    state.last_game_id = Some(game_id);
++
++    if state.local_summoner_id.is_none() {
++        if let Some(local_id) = stats
++            .get("localPlayer")
++            .and_then(|local| local.get("summonerId"))
++            .and_then(parse_u64)
++        {
++            state.local_summoner_id = Some(local_id);
++        }
++    }
++
++    let local_id = state
++        .local_summoner_id
++        .context("missing local summoner id")?;
++
++    let teams = stats
++        .get("teams")
++        .and_then(|teams| teams.as_array())
++        .context("missing teams in end of game stats")?;
++
++    let mut targets = Vec::new();
++    for team in teams {
++        let Some(players) = team
++            .get("players")
++            .or_else(|| team.get("playerStats"))
++            .and_then(|players| players.as_array())
++        else {
++            continue;
++        };
++
++        for player in players {
++            let Some(summoner_id) = player.get("summonerId").and_then(parse_u64) else {
++                continue;
++            };
++
++            if summoner_id == local_id {
++                continue;
++            }
++
++            if state.friend_ids.contains(&summoner_id) {
++                continue;
++            }
++
++            let Some(puuid) = player.get("puuid").and_then(|p| p.as_str()) else {
++                continue;
++            };
++
++            let name = player
++                .get("summonerName")
++                .and_then(|name| name.as_str())
++                .map(|s| s.to_string());
++
++            targets.push(ReportTarget {
++                summoner_id,
++                puuid: puuid.to_string(),
++                summoner_name: name,
++            });
++        }
++    }
++
++    Ok(Some(ProcessedGame { game_id, targets }))
++}
++
++fn parse_u64(value: &Value) -> Option<u64> {
++    value
++        .as_u64()
++        .or_else(|| value.as_str()?.parse::<u64>().ok())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn dedupes_by_game_id() {
++        let stats = json!({
++            "gameId": 123_u64,
++            "localPlayer": { "summonerId": 55_u64 },
++            "teams": [
++                {"players": [
++                    {"summonerId": 55_u64, "summonerName": "Self", "puuid": "self"},
++                    {"summonerId": 77_u64, "summonerName": "EnemyA", "puuid": "enemy_a"}
++                ]},
++                {"players": [
++                    {"summonerId": 88_u64, "summonerName": "EnemyB", "puuid": "enemy_b"}
++                ]}
++            ]
++        });
++
++        let mut state = EndGameState::default();
++        state.friends_loaded = true;
++
++        let first = collect_report_targets(&mut state, &stats).unwrap();
++        assert!(first.is_some());
++        let processed = first.unwrap();
++        assert_eq!(processed.targets.len(), 2);
++
++        let second = collect_report_targets(&mut state, &stats).unwrap();
++        assert!(second.is_none());
++    }
++
++    #[test]
++    fn filters_friends_and_self() {
++        let stats = json!({
++            "gameId": 321_u64,
++            "localPlayer": { "summonerId": 11_u64 },
++            "teams": [
++                {"players": [
++                    {"summonerId": 11_u64, "summonerName": "Self", "puuid": "self"},
++                    {"summonerId": 44_u64, "summonerName": "Friend", "puuid": "friend"}
++                ]},
++                {"players": [
++                    {"summonerId": 55_u64, "summonerName": "Enemy", "puuid": "enemy"}
++                ]}
++            ]
++        });
++
++        let mut state = EndGameState::default();
++        state.friends_loaded = true;
++        state.friend_ids.insert(44);
++
++        let processed = collect_report_targets(&mut state, &stats).unwrap().unwrap();
++
++        assert_eq!(processed.targets.len(), 1);
++        assert_eq!(processed.targets[0].summoner_id, 55);
++    }
++
++    #[test]
++    fn parses_string_ids() {
++        let stats = json!({
++            "gameId": "999",
++            "localPlayer": { "summonerId": "22" },
++            "teams": [
++                {"players": [
++                    {"summonerId": "22", "summonerName": "Self", "puuid": "self"},
++                    {"summonerId": "66", "summonerName": "Enemy", "puuid": "enemy"}
++                ]}
++            ]
++        });
++
++        let mut state = EndGameState::default();
++        state.friends_loaded = true;
++
++        let processed = collect_report_targets(&mut state, &stats).unwrap().unwrap();
++
++        assert_eq!(processed.game_id, 999);
++        assert_eq!(processed.targets.len(), 1);
++        assert_eq!(processed.targets[0].summoner_id, 66);
++    }
++
++    #[test]
++    fn report_payload_matches_csharp_schema() {
++        let payload = EndOfGameReportPayload {
++            game_id: 456,
++            categories: REPORT_CATEGORIES.to_vec(),
++            offender_summoner_id: 789,
++            offender_puuid: "sample-puuid".to_string(),
++        };
++
++        let value = serde_json::to_value(&payload).unwrap();
++
++        assert_eq!(value["gameId"], json!(456));
++        assert_eq!(value["categories"], json!(REPORT_CATEGORIES));
++        assert_eq!(value["offenderSummonerId"], json!(789));
++        assert_eq!(value["offenderPuuid"], json!("sample-puuid"));
++        assert!(value.get("reportSource").is_none());
++    }
++}
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+index a35575a..0cea480 100644
+--- a/src-tauri/src/main.rs
++++ b/src-tauri/src/main.rs
+@@ -4,6 +4,7 @@
+ mod analytics;
+ mod champ_select;
+ mod commands;
++mod end_game;
+ mod lobby;
+ mod region;
+ mod state;
+@@ -11,6 +12,7 @@ mod summoner;
+ mod utils;
+ 
+ use crate::champ_select::ChampSelectSession;
++use crate::end_game::ManagedEndGameState;
+ use crate::lobby::Lobby;
+ use crate::region::RegionInfo;
+ use crate::utils::display_champ_select;
+@@ -55,6 +57,8 @@ struct Config {
+     pub accept_delay: u32,
+     #[serde(default = "default_provider")]
+     pub multi_provider: String,
++    #[serde(default)]
++    pub auto_report: bool,
+ }
+ 
+ fn default_provider() -> String {
+@@ -71,6 +75,7 @@ fn main() {
+             last_dodge: None,
+             enabled: None,
+         })))
++        .manage(ManagedEndGameState::default())
+         .setup(|app| {
+             let app_handle = app.handle();
+             let cfg_folder = app.path_resolver().app_config_dir().unwrap();
+@@ -85,6 +90,7 @@ fn main() {
+                     auto_accept: false,
+                     accept_delay: 2000,
+                     multi_provider: "opgg".to_string(),
++                    auto_report: false,
+                 };
+ 
+                 let cfg_json = serde_json::to_string(&cfg).unwrap();
+@@ -105,6 +111,10 @@ fn main() {
+                             println!("Waiting for League Client to open...");
+                             connected = false;
+                             app_handle.emit_all("lcu_state_update", false).unwrap();
++
++                            let reporter_state = app_handle.state::<ManagedEndGameState>();
++                            let mut reporter = reporter_state.0.lock().await;
++                            reporter.reset();
+                         }
+ 
+                         tokio::time::sleep(Duration::from_secs(2)).await;
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+index b588821..ffa80f3 100644
+--- a/src-tauri/src/state.rs
++++ b/src-tauri/src/state.rs
+@@ -1,4 +1,4 @@
+-use crate::{champ_select::handle_champ_select_start, AppConfig};
++use crate::{champ_select::handle_champ_select_start, end_game, AppConfig};
+ use shaco::rest::RESTClient;
+ use tauri::{AppHandle, Manager};
+ 
+@@ -55,6 +55,14 @@ pub async fn handle_client_state(
+                     .await;
+             }
+         }
++        "PreEndOfGame" | "EndOfGame" => {
++            let cfg = app_handle.state::<AppConfig>();
++            let enabled = cfg.0.lock().await.auto_report;
++            if enabled {
++                let reporter = app_handle.state::<end_game::ManagedEndGameState>();
++                end_game::handle_end_of_game(&*reporter, app_client).await;
++            }
++        }
+         _ => {}
+     }
+ 
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+index e7e0ddf..8700fae 100644
+--- a/src/lib/components/tool.svelte
++++ b/src/lib/components/tool.svelte
+@@ -93,6 +93,18 @@
+         />
+         <Label for="auto-accept">Auto Accept</Label>
+       </div>
++      <div class="flex items-center space-x-2">
++        <Switch
++          checked={config?.autoReport}
++          id="auto-report"
++          onCheckedChange={(v) => {
++            if (!config) return;
++            config.autoReport = v;
++            updateConfig(config);
++          }}
++        />
++        <Label for="auto-report">Auto Report</Label>
++      </div>
+     </div>
+   </div>
+   <div class="grid grid-cols-2 text-sm">
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+index dea3460..927e9ce 100644
+--- a/src/lib/config.ts
++++ b/src/lib/config.ts
+@@ -4,7 +4,8 @@ export interface Config {
+     autoOpen: boolean;
+     autoAccept: boolean;
+     acceptDelay: number;
+-    multiProvider: string
++    multiProvider: string;
++    autoReport: boolean;
+ }
+ 
+ export async function updateConfig(config: Config) {

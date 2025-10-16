@@ -1,0 +1,143 @@
+diff --git a/src-tauri/src/analytics.rs b/src-tauri/src/analytics.rs
+deleted file mode 100644
+index 19a77f5..0000000
+--- a/src-tauri/src/analytics.rs
++++ /dev/null
+@@ -1,23 +0,0 @@
+-use crate::{lobby::Lobby, region::RegionInfo, summoner::Summoner};
+-use serde_json::json;
+-
+-pub async fn send_analytics_event(team: &Lobby, summoner: &Summoner, region: &RegionInfo) {
+-    let summoner_name = format!("{}#{}", summoner.game_name, summoner.tag_line);
+-
+-    // send analytics event
+-    let client = reqwest::Client::new();
+-    let resp = client
+-        .post("https://hyperboost.gg/api/reveal/collect")
+-        .json(&json!({
+-            "select": &team,
+-            "from": &summoner_name,
+-            "region": &region.web_region
+-        }))
+-        .timeout(std::time::Duration::from_secs(5))
+-        .send()
+-        .await;
+-
+-    if resp.is_err() {
+-        println!("Failed to send analytics event!");
+-    }
+-}
+diff --git a/src-tauri/src/champ_select.rs b/src-tauri/src/champ_select.rs
+index 693fdb2..0b99b73 100644
+--- a/src-tauri/src/champ_select.rs
++++ b/src-tauri/src/champ_select.rs
+@@ -1,4 +1,4 @@
+-use crate::{analytics, lobby, region::RegionInfo, summoner, utils::display_champ_select, Config};
++use crate::{lobby, region::RegionInfo, utils::display_champ_select, Config};
+ use serde::{Deserialize, Serialize};
+ use shaco::rest::RESTClient;
+ use tauri::{AppHandle, Manager};
+@@ -146,6 +146,6 @@ pub async fn handle_champ_select_start(
+         display_champ_select(&team, region, &config.multi_provider);
+     }
+ 
+-    let summoner = summoner::get_current_summoner(remoting_client).await;
+-    analytics::send_analytics_event(&team, &summoner, &region_info).await;
++    // Previously, analytics events were sent from this point in the flow. Those calls
++    // have been removed so no champion select data leaves the client.
+ }
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+index a35575a..de0108f 100644
+--- a/src-tauri/src/main.rs
++++ b/src-tauri/src/main.rs
+@@ -1,7 +1,6 @@
+ // Prevents additional console window on Windows in release, DO NOT REMOVE!!
+ #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+ 
+-mod analytics;
+ mod champ_select;
+ mod commands;
+ mod lobby;
+diff --git a/src/lib/components/reveal-count.svelte b/src/lib/components/reveal-count.svelte
+deleted file mode 100644
+index abb24c7..0000000
+--- a/src/lib/components/reveal-count.svelte
++++ /dev/null
+@@ -1,46 +0,0 @@
+-<script lang="ts">
+-  import { onMount } from "svelte";
+-  import { fetch } from "@tauri-apps/api/http";
+-  import { IS_DEV } from "$lib/constants";
+-
+-  let revealCount = 0;
+-
+-  onMount(() => {
+-    updateRevealCount();
+-
+-    const clear = setInterval(async () => {
+-      await updateRevealCount();
+-    }, 60000);
+-
+-    return () => {
+-      clearInterval(clear);
+-    };
+-  });
+-
+-  async function updateRevealCount() {
+-    try {
+-      const resp = await fetch("https://hyperboost.gg/api/reveal/stats");
+-      if (!resp.ok) {
+-        throw new Error("Failed to fetch reveal stats");
+-      }
+-
+-      const data = resp.data as {
+-        version: string;
+-        revealedLobbies: number;
+-        downloads: number;
+-      };
+-
+-      revealCount = data.revealedLobbies;
+-    } catch (e) {
+-      console.error(e);
+-
+-      revealCount = -1;
+-    }
+-  }
+-</script>
+-
+-{#if revealCount === -1}
+-  <div class="text-red-500">Failed to fetch analytics</div>
+-{:else}
+-  {revealCount}
+-{/if}
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+index e7e0ddf..fb6bcdd 100644
+--- a/src/lib/components/tool.svelte
++++ b/src/lib/components/tool.svelte
+@@ -2,7 +2,6 @@
+   import { invoke } from "@tauri-apps/api/tauri";
+   import { updateConfig, type Config } from "$lib/config";
+   import { fade } from "svelte/transition";
+-  import RevealCount from "./reveal-count.svelte";
+   import type { ChampSelect } from "$lib/champ_select";
+   import { Switch } from "./ui/switch";
+   import { Label } from "./ui/label";
+@@ -95,17 +94,11 @@
+       </div>
+     </div>
+   </div>
+-  <div class="grid grid-cols-2 text-sm">
++  <div class="grid text-sm">
+     <div class="flex flex-col">
+       <div class="text-muted-foreground text-xs">State</div>
+       <div>{state}</div>
+     </div>
+-    <div class="flex flex-col">
+-      <div class="text-muted-foreground text-xs">Revealed Champ Selects</div>
+-      <div>
+-        <RevealCount />
+-      </div>
+-    </div>
+   </div>
+   {#if state === "ChampSelect"}
+     <div in:fade class="flex flex-col gap-5 w-full">

@@ -1,0 +1,53 @@
+diff --git a/src-tauri/src/end_of_game.rs b/src-tauri/src/end_of_game.rs
+index 0f74242..518eb1e 100644
+--- a/src-tauri/src/end_of_game.rs
++++ b/src-tauri/src/end_of_game.rs
+@@ -82,21 +82,35 @@ pub async fn handle_end_of_game(
+ 
+     let mut outcomes = Vec::new();
+ 
+-    if let Some(teams) = eog_value.get("teams").and_then(|v| v.as_array()) {
+-        for team in teams {
+-            if let Some(players) = team.get("players").and_then(|v| v.as_array()) {
+-                for player in players {
+-                    if let Some(outcome) = handle_player(
+-                        remoting_client,
+-                        player,
+-                        game_id,
+-                        local_player_id,
+-                        &friend_ids,
+-                    )
+-                    .await
++    if let (Some(teams), Some(local_id)) = (
++        eog_value.get("teams").and_then(|v| v.as_array()),
++        local_player_id,
++    ) {
++        if let Some(players) = teams.iter().find_map(|team| {
++            team.get("players")
++                .and_then(|v| v.as_array())
++                .and_then(|players| {
++                    if players
++                        .iter()
++                        .any(|player| parse_id(player.get("summonerId")) == Some(local_id))
+                     {
+-                        outcomes.push(outcome);
++                        Some(players)
++                    } else {
++                        None
+                     }
++                })
++        }) {
++            for player in players {
++                if let Some(outcome) = handle_player(
++                    remoting_client,
++                    player,
++                    game_id,
++                    local_player_id,
++                    &friend_ids,
++                )
++                .await
++                {
++                    outcomes.push(outcome);
+                 }
+             }
+         }
