@@ -1,0 +1,423 @@
+diff --git a/src-tauri/src/champ_select.rs b/src-tauri/src/champ_select.rs
+index 693fdb2..fce4343 100644
+--- a/src-tauri/src/champ_select.rs
++++ b/src-tauri/src/champ_select.rs
+@@ -146,6 +146,6 @@ pub async fn handle_champ_select_start(
+         display_champ_select(&team, region, &config.multi_provider);
+     }
+ 
+-    let summoner = summoner::get_current_summoner(remoting_client).await;
++    let summoner = summoner::get_current_summoner(app_client).await;
+     analytics::send_analytics_event(&team, &summoner, &region_info).await;
+ }
+diff --git a/src-tauri/src/end_game.rs b/src-tauri/src/end_game.rs
+new file mode 100644
+index 0000000..cd32dd6
+--- /dev/null
++++ b/src-tauri/src/end_game.rs
+@@ -0,0 +1,189 @@
++use crate::{summoner::get_friend_summoner_ids, AppConfig, ManagedDodgeState};
++use futures::future::join_all;
++use serde::{Deserialize, Serialize};
++use serde_json::Value;
++use shaco::rest::RESTClient;
++use std::{collections::HashSet, time::Duration};
++use tauri::{AppHandle, Manager};
++
++struct ProcessOutcome {
++    game_id: u64,
++    reports_sent: Vec<Player>,
++}
++
++#[derive(Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct EndOfGameStats {
++    pub game_id: u64,
++    pub local_player: LocalPlayer,
++    pub teams: Vec<Team>,
++}
++
++#[derive(Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct LocalPlayer {
++    pub summoner_id: u64,
++}
++
++#[derive(Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Team {
++    pub players: Vec<Player>,
++}
++
++#[derive(Debug, Deserialize, Serialize, Clone)]
++#[serde(rename_all = "camelCase")]
++pub struct Player {
++    pub summoner_id: u64,
++    pub summoner_name: String,
++    pub champion_name: String,
++    pub puuid: String,
++}
++
++#[derive(Debug, Serialize)]
++#[serde(rename_all = "camelCase")]
++struct PlayerReportPayload {
++    pub game_id: u64,
++    pub categories: Vec<&'static str>,
++    pub offender_summoner_id: u64,
++    pub offender_puuid: String,
++}
++
++pub async fn handle_end_game_start(app_handle: &AppHandle, remoting_client: &RESTClient) {
++    tokio::time::sleep(Duration::from_millis(500)).await;
++
++    let cfg_state = app_handle.state::<AppConfig>();
++    if !cfg_state.0.lock().await.auto_report {
++        return;
++    }
++
++    let dodge_state = app_handle.state::<ManagedDodgeState>();
++    let previous_game_id = {
++        let mut dodge_state = dodge_state.0.lock().await;
++
++        if dodge_state.is_reporting {
++            return;
++        }
++
++        dodge_state.is_reporting = true;
++        dodge_state.last_reported_game
++    };
++
++    let friend_ids = get_friend_summoner_ids(remoting_client).await;
++
++    let outcome = process_end_game(remoting_client, previous_game_id, friend_ids).await;
++
++    {
++        let mut dodge_state = dodge_state.0.lock().await;
++        dodge_state.is_reporting = false;
++
++        if let Some(outcome) = outcome.as_ref() {
++            dodge_state.last_reported_game = Some(outcome.game_id);
++        }
++    }
++
++    if let Some(outcome) = outcome {
++        if !outcome.reports_sent.is_empty() {
++            let _ = app_handle.emit_all("end_game_reports_sent", &outcome.reports_sent);
++        }
++    }
++}
++
++async fn process_end_game(
++    remoting_client: &RESTClient,
++    previous_game_id: Option<u64>,
++    friend_ids: HashSet<u64>,
++) -> Option<ProcessOutcome> {
++    let stats_value = match remoting_client
++        .get("/lol-end-of-game/v1/eog-stats-block".to_string())
++        .await
++    {
++        Ok(value) => value,
++        Err(err) => {
++            println!("Failed to fetch end of game stats: {err:?}");
++            return None;
++        }
++    };
++
++    let stats: EndOfGameStats = match serde_json::from_value(stats_value) {
++        Ok(stats) => stats,
++        Err(err) => {
++            println!("Failed to parse end of game stats: {err:?}");
++            return None;
++        }
++    };
++
++    if previous_game_id.map_or(false, |id| id == stats.game_id) {
++        return None;
++    }
++
++    let current_player_id = stats.local_player.summoner_id;
++    let game_id = stats.game_id;
++    let mut report_tasks = Vec::new();
++
++    for team in stats.teams.iter() {
++        for player in team.players.iter() {
++            if player.summoner_id == current_player_id {
++                continue;
++            }
++
++            if friend_ids.contains(&player.summoner_id) {
++                continue;
++            }
++
++            let client = remoting_client.clone();
++            let player_clone = player.clone();
++
++            report_tasks
++                .push(async move { handle_player_report(client, game_id, player_clone).await });
++        }
++    }
++
++    let results = join_all(report_tasks).await;
++    let reports_sent: Vec<Player> = results.into_iter().flatten().collect();
++
++    Some(ProcessOutcome {
++        game_id,
++        reports_sent,
++    })
++}
++
++async fn handle_player_report(
++    remoting_client: RESTClient,
++    game_id: u64,
++    player: Player,
++) -> Option<Player> {
++    let payload = PlayerReportPayload {
++        game_id,
++        categories: vec![
++            "NEGATIVE_ATTITUDE",
++            "VERBAL_ABUSE",
++            "LEAVING_AFK",
++            "ASSISTING_ENEMY_TEAM",
++            "HATE_SPEECH",
++            "THIRD_PARTY_TOOLS",
++            "INAPPROPRIATE_NAME",
++        ],
++        offender_summoner_id: player.summoner_id,
++        offender_puuid: player.puuid.clone(),
++    };
++
++    let body = Value::Array(vec![serde_json::to_value(&payload).unwrap()]);
++
++    match remoting_client
++        .post(
++            "/lol-player-report-sender/v1/end-of-game-reports".to_string(),
++            body,
++        )
++        .await
++    {
++        Ok(_) => Some(player),
++        Err(err) => {
++            println!(
++                "Failed to send report for {}#{} ({:?}): {:?}",
++                player.summoner_name, player.champion_name, player.summoner_id, err
++            );
++            None
++        }
++    }
++}
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+index a35575a..9554c6d 100644
+--- a/src-tauri/src/main.rs
++++ b/src-tauri/src/main.rs
+@@ -4,6 +4,7 @@
+ mod analytics;
+ mod champ_select;
+ mod commands;
++mod end_game;
+ mod lobby;
+ mod region;
+ mod state;
+@@ -43,6 +44,8 @@ struct ManagedDodgeState(Mutex<DodgeState>);
+ pub struct DodgeState {
+     pub last_dodge: Option<u64>,
+     pub enabled: Option<u64>,
++    pub last_reported_game: Option<u64>,
++    pub is_reporting: bool,
+ }
+ 
+ struct AppConfig(Mutex<Config>);
+@@ -55,6 +58,8 @@ struct Config {
+     pub accept_delay: u32,
+     #[serde(default = "default_provider")]
+     pub multi_provider: String,
++    #[serde(default)]
++    pub auto_report: bool,
+ }
+ 
+ fn default_provider() -> String {
+@@ -70,6 +75,8 @@ fn main() {
+         .manage(ManagedDodgeState(Mutex::new(DodgeState {
+             last_dodge: None,
+             enabled: None,
++            last_reported_game: None,
++            is_reporting: false,
+         })))
+         .setup(|app| {
+             let app_handle = app.handle();
+@@ -85,6 +92,7 @@ fn main() {
+                     auto_accept: false,
+                     accept_delay: 2000,
+                     multi_provider: "opgg".to_string(),
++                    auto_report: false,
+                 };
+ 
+                 let cfg_json = serde_json::to_string(&cfg).unwrap();
+@@ -105,6 +113,11 @@ fn main() {
+                             println!("Waiting for League Client to open...");
+                             connected = false;
+                             app_handle.emit_all("lcu_state_update", false).unwrap();
++
++                            let dodge_state = app_handle.state::<ManagedDodgeState>();
++                            let mut dodge_state = dodge_state.0.lock().await;
++                            dodge_state.last_reported_game = None;
++                            dodge_state.is_reporting = false;
+                         }
+ 
+                         tokio::time::sleep(Duration::from_secs(2)).await;
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+index b588821..e2fd937 100644
+--- a/src-tauri/src/state.rs
++++ b/src-tauri/src/state.rs
+@@ -1,4 +1,4 @@
+-use crate::{champ_select::handle_champ_select_start, AppConfig};
++use crate::{champ_select::handle_champ_select_start, end_game::handle_end_game_start, AppConfig};
+ use shaco::rest::RESTClient;
+ use tauri::{AppHandle, Manager};
+ 
+@@ -55,6 +55,14 @@ pub async fn handle_client_state(
+                     .await;
+             }
+         }
++        "PreEndOfGame" | "EndOfGame" => {
++            let cloned_app_handle = app_handle.clone();
++            let cloned_remoting = remoting_client.clone();
++
++            tauri::async_runtime::spawn(async move {
++                handle_end_game_start(&cloned_app_handle, &cloned_remoting).await;
++            });
++        }
+         _ => {}
+     }
+ 
+diff --git a/src-tauri/src/summoner.rs b/src-tauri/src/summoner.rs
+index cb1a43e..ed27ede 100644
+--- a/src-tauri/src/summoner.rs
++++ b/src-tauri/src/summoner.rs
+@@ -1,5 +1,7 @@
+ use serde::{Deserialize, Serialize};
++use serde_json::Value;
+ use shaco::rest::RESTClient;
++use std::collections::HashSet;
+ 
+ #[derive(Debug, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -32,9 +34,16 @@ pub struct RerollPoints {
+     pub points_to_reroll: i64,
+ }
+ 
+-pub async fn get_current_summoner(remoting_client: &RESTClient) -> Summoner {
++#[derive(Debug, Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct Friend {
++    #[serde(rename = "summonerId")]
++    summoner_id: u64,
++}
++
++pub async fn get_current_summoner(app_client: &RESTClient) -> Summoner {
+     let summoner: Summoner = serde_json::from_value(
+-        remoting_client
++        app_client
+             .get("/lol-summoner/v1/current-summoner".to_string())
+             .await
+             .unwrap(),
+@@ -43,3 +52,48 @@ pub async fn get_current_summoner(remoting_client: &RESTClient) -> Summoner {
+ 
+     summoner
+ }
++
++pub async fn get_friend_summoner_ids(remoting_client: &RESTClient) -> HashSet<u64> {
++    let resp = remoting_client
++        .get("/lol-chat/v1/friends".to_string())
++        .await;
++
++    match resp {
++        Ok(value) => match serde_json::from_value::<Vec<Friend>>(value) {
++            Ok(friends) => friends.into_iter().map(|f| f.summoner_id).collect(),
++            Err(err) => {
++                println!("Failed to parse friends list: {err:?}");
++                HashSet::new()
++            }
++        },
++        Err(err) => {
++            println!("Failed to fetch friends list: {err:?}");
++            HashSet::new()
++        }
++    }
++}
++
++pub async fn get_friend_puuids(remoting_client: &RESTClient) -> Vec<String> {
++    let value: Value = remoting_client
++        .get("/lol-chat/v1/friends".to_string())
++        .await
++        .unwrap_or_else(|err| {
++            println!("Failed to fetch friends list: {err:?}");
++            Value::Null
++        });
++
++    extract_friend_puuids(&value)
++}
++
++pub fn extract_friend_puuids(value: &Value) -> Vec<String> {
++    value
++        .as_array()
++        .map(|friends| {
++            friends
++                .iter()
++                .filter_map(|friend| friend.get("puuid").and_then(|v| v.as_str()))
++                .map(|puuid| puuid.to_string())
++                .collect::<Vec<String>>()
++        })
++        .unwrap_or_default()
++}
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+index e7e0ddf..0b5ab5d 100644
+--- a/src/lib/components/tool.svelte
++++ b/src/lib/components/tool.svelte
+@@ -93,6 +93,18 @@
+         />
+         <Label for="auto-accept">Auto Accept</Label>
+       </div>
++      <div class="flex items-center space-x-2">
++        <Switch
++          checked={config?.autoReport}
++          id="auto-report"
++          onCheckedChange={(v) => {
++            if (!config) return;
++            config.autoReport = v;
++            updateConfig(config);
++          }}
++        />
++        <Label for="auto-report">Auto Report</Label>
++      </div>
+     </div>
+   </div>
+   <div class="grid grid-cols-2 text-sm">
+@@ -152,6 +164,14 @@
+     </div>
+   {:else if state === "InProgress"}
+     <div in:fade class="flex gap-2 items-center animate-pulse">In Game</div>
++  {:else if state === "PreEndOfGame" || state === "EndOfGame"}
++    <div in:fade class="flex gap-2 items-center">
++      {#if config?.autoReport}
++        <span class="animate-pulse">Processing Reports...</span>
++      {:else}
++        <span>Game Ended</span>
++      {/if}
++    </div>
+   {:else if !connected}
+     <div in:fade class="flex gap-2 items-center animate-pulse">
+       Trying to find League Client...
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+index dea3460..927e9ce 100644
+--- a/src/lib/config.ts
++++ b/src/lib/config.ts
+@@ -4,7 +4,8 @@ export interface Config {
+     autoOpen: boolean;
+     autoAccept: boolean;
+     acceptDelay: number;
+-    multiProvider: string
++    multiProvider: string;
++    autoReport: boolean;
+ }
+ 
+ export async function updateConfig(config: Config) {

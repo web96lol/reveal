@@ -1,0 +1,641 @@
+diff --git a/src-tauri/src/commands.rs b/src-tauri/src/commands.rs
+index 2894977..7f7aa73 100644
+--- a/src-tauri/src/commands.rs
++++ b/src-tauri/src/commands.rs
+@@ -1,6 +1,6 @@
+ use crate::{
+-    champ_select::ChampSelectSession, lobby::get_lobby_info, region::RegionInfo,
+-    utils::display_champ_select, AppConfig, Config, ManagedDodgeState, LCU,
++    champ_select::ChampSelectSession, lobby::get_lobby_info, post_game, region::RegionInfo,
++    utils::display_champ_select, AppConfig, Config, ManagedDodgeState, ManagedPostGameState, LCU,
+ };
+ use shaco::rest::{LCUClientInfo, RESTClient};
+ use tauri::{AppHandle, Manager};
+@@ -131,3 +131,30 @@ pub async fn enable_dodge(app_handle: AppHandle) -> Result<(), ()> {
+     dodge_state.enabled = Some(champ_select.game_id);
+     Ok(())
+ }
++
++#[tauri::command]
++pub async fn process_last_game(
++    app_handle: AppHandle,
++) -> Result<post_game::PostGameSummary, String> {
++    let lcu_state = app_handle.state::<LCU>();
++    let lcu_state = lcu_state.0.lock().await;
++
++    if !lcu_state.connected {
++        return Err("League Client is not connected".to_string());
++    }
++
++    let lcu_info = lcu_state
++        .data
++        .clone()
++        .ok_or_else(|| "LCU connection not initialized".to_string())?;
++    drop(lcu_state);
++
++    let app_client = RESTClient::new(lcu_info.clone(), false)
++        .map_err(|err| format!("Failed to create app client: {:?}", err))?;
++    let remoting_client = RESTClient::new(lcu_info, true)
++        .map_err(|err| format!("Failed to create remoting client: {:?}", err))?;
++
++    let post_game_state = app_handle.state::<ManagedPostGameState>();
++
++    post_game::process_last_game(&post_game_state.0, &app_client, &remoting_client).await
++}
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+index a35575a..6cf2740 100644
+--- a/src-tauri/src/main.rs
++++ b/src-tauri/src/main.rs
+@@ -5,6 +5,7 @@ mod analytics;
+ mod champ_select;
+ mod commands;
+ mod lobby;
++mod post_game;
+ mod region;
+ mod state;
+ mod summoner;
+@@ -16,10 +17,11 @@ use crate::region::RegionInfo;
+ use crate::utils::display_champ_select;
+ use commands::{
+     app_ready, dodge, enable_dodge, get_config, get_lcu_info, get_lcu_state, open_opgg_link,
+-    set_config,
++    process_last_game, set_config,
+ };
+ use futures_util::StreamExt;
+ use lobby::Participant;
++use post_game::PostGameState;
+ use serde::{Deserialize, Serialize};
+ use serde_json::json;
+ use shaco::model::ws::LcuEvent;
+@@ -47,6 +49,8 @@ pub struct DodgeState {
+ 
+ struct AppConfig(Mutex<Config>);
+ 
++struct ManagedPostGameState(Mutex<PostGameState>);
++
+ #[derive(Serialize, Deserialize, Clone, Debug)]
+ #[serde(rename_all = "camelCase")]
+ struct Config {
+@@ -55,6 +59,8 @@ struct Config {
+     pub accept_delay: u32,
+     #[serde(default = "default_provider")]
+     pub multi_provider: String,
++    #[serde(default)]
++    pub auto_report_non_friends: bool,
+ }
+ 
+ fn default_provider() -> String {
+@@ -85,6 +91,7 @@ fn main() {
+                     auto_accept: false,
+                     accept_delay: 2000,
+                     multi_provider: "opgg".to_string(),
++                    auto_report_non_friends: false,
+                 };
+ 
+                 let cfg_json = serde_json::to_string(&cfg).unwrap();
+@@ -94,6 +101,7 @@ fn main() {
+             let cfg_json = std::fs::read_to_string(&cfg_path).unwrap();
+             let cfg: Config = serde_json::from_str(&cfg_json).unwrap();
+             app.manage(AppConfig(Mutex::new(cfg)));
++            app.manage(ManagedPostGameState(Mutex::new(PostGameState::default())));
+ 
+             tauri::async_runtime::spawn(async move {
+                 let mut connected = true;
+@@ -179,7 +187,8 @@ fn main() {
+             set_config,
+             open_opgg_link,
+             dodge,
+-            enable_dodge
++            enable_dodge,
++            process_last_game
+         ])
+         .run(tauri::generate_context!())
+         .expect("error while running tauri application");
+diff --git a/src-tauri/src/post_game.rs b/src-tauri/src/post_game.rs
+new file mode 100644
+index 0000000..34de79c
+--- /dev/null
++++ b/src-tauri/src/post_game.rs
+@@ -0,0 +1,268 @@
++use crate::summoner::get_current_summoner;
++use crate::summoner::Summoner;
++use serde::{Deserialize, Serialize};
++use serde_json::json;
++use shaco::rest::RESTClient;
++use std::collections::HashSet;
++use tokio::sync::Mutex;
++
++const REPORT_CATEGORIES: &[&str] = &[
++    "NEGATIVE_ATTITUDE",
++    "VERBAL_ABUSE",
++    "LEAVING_AFK",
++    "ASSISTING_ENEMY_TEAM",
++    "HATE_SPEECH",
++    "THIRD_PARTY_TOOLS",
++    "INAPPROPRIATE_NAME",
++];
++
++#[derive(Default)]
++pub struct PostGameState {
++    pub cached_friends: Option<HashSet<String>>,
++    pub last_processed_game_id: Option<i64>,
++}
++
++#[derive(Clone, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct PlayerActionSummary {
++    pub puuid: String,
++    pub summoner_id: i64,
++    pub game_name: Option<String>,
++    pub tag_line: Option<String>,
++    pub summoner_name: Option<String>,
++    pub report_sent: bool,
++    pub categories: Vec<String>,
++}
++
++#[derive(Clone, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct PostGameSummary {
++    pub game_id: i64,
++    pub players: Vec<PlayerActionSummary>,
++}
++
++#[derive(Debug, Deserialize, Clone)]
++#[serde(rename_all = "camelCase")]
++struct FriendInfo {
++    pub puuid: String,
++}
++
++#[derive(Debug, Deserialize, Clone)]
++#[serde(rename_all = "camelCase")]
++struct EogStatsBlock {
++    #[serde(rename = "gameId")]
++    pub game_id: i64,
++    pub teams: Vec<EogTeam>,
++}
++
++#[derive(Debug, Deserialize, Clone)]
++#[serde(rename_all = "camelCase")]
++struct EogTeam {
++    pub players: Vec<EogPlayer>,
++}
++
++#[derive(Debug, Deserialize, Clone)]
++#[serde(rename_all = "camelCase")]
++struct EogPlayer {
++    pub puuid: String,
++    pub summoner_id: i64,
++    pub summoner_name: Option<String>,
++    pub game_name: Option<String>,
++    pub tag_line: Option<String>,
++    pub riot_id_game_name: Option<String>,
++    pub riot_id_tagline: Option<String>,
++    pub team_id: Option<i64>,
++    pub champion_id: Option<i64>,
++}
++
++#[derive(Debug, Deserialize, Clone)]
++#[serde(rename_all = "camelCase")]
++struct GameflowSession {
++    pub phase: Option<String>,
++    pub game_data: Option<GameflowGameData>,
++}
++
++#[derive(Debug, Deserialize, Clone)]
++#[serde(rename_all = "camelCase")]
++struct GameflowGameData {
++    pub game_id: Option<i64>,
++}
++
++pub async fn process_last_game(
++    state: &Mutex<PostGameState>,
++    app_client: &RESTClient,
++    remoting_client: &RESTClient,
++) -> Result<PostGameSummary, String> {
++    let mut cached_friends;
++    let last_processed_game_id;
++
++    {
++        let state_guard = state.lock().await;
++        cached_friends = state_guard.cached_friends.clone();
++        last_processed_game_id = state_guard.last_processed_game_id;
++    }
++
++    if cached_friends.is_none() {
++        let fetched = fetch_friend_ids(app_client).await?;
++        let mut state_guard = state.lock().await;
++        state_guard.cached_friends = Some(fetched.clone());
++        cached_friends = Some(fetched);
++    }
++
++    let friend_ids = cached_friends.unwrap();
++
++    let eog_value = remoting_client
++        .get("/lol-end-of-game/v1/eog-stats-block".to_string())
++        .await
++        .map_err(|err| format!("Failed to fetch end of game stats: {:?}", err))?;
++
++    if eog_value.is_null() {
++        return Err("No end of game stats available".to_string());
++    }
++
++    let eog: EogStatsBlock = serde_json::from_value(eog_value.clone())
++        .map_err(|err| format!("Failed to parse end of game stats: {:?}", err))?;
++
++    if let Some(last) = last_processed_game_id {
++        if last == eog.game_id {
++            return Err("Last game already processed".to_string());
++        }
++    }
++
++    let session = remoting_client
++        .get("/lol-gameflow/v1/session".to_string())
++        .await
++        .map_err(|err| format!("Failed to fetch gameflow session: {:?}", err))?;
++
++    let _session: GameflowSession = serde_json::from_value(session.clone())
++        .map_err(|err| format!("Failed to parse gameflow session: {:?}", err))?;
++
++    let summoner = get_current_summoner(remoting_client).await;
++    let self_puuid = summoner.puuid.clone();
++
++    let mut targets: Vec<(EogPlayer, PlayerActionSummary)> = Vec::new();
++    for team in &eog.teams {
++        for player in &team.players {
++            if player.puuid.is_empty() {
++                continue;
++            }
++
++            if player.puuid == self_puuid {
++                continue;
++            }
++
++            if friend_ids.contains(&player.puuid) {
++                continue;
++            }
++
++            targets.push((
++                player.clone(),
++                PlayerActionSummary {
++                    puuid: player.puuid.clone(),
++                    summoner_id: player.summoner_id,
++                    game_name: preferred_game_name(player),
++                    tag_line: preferred_tag_line(player),
++                    summoner_name: player.summoner_name.clone(),
++                    report_sent: false,
++                    categories: REPORT_CATEGORIES
++                        .iter()
++                        .map(|category| category.to_string())
++                        .collect(),
++                },
++            ));
++        }
++    }
++
++    if targets.is_empty() {
++        let mut state_guard = state.lock().await;
++        state_guard.last_processed_game_id = Some(eog.game_id);
++        return Ok(PostGameSummary {
++            game_id: eog.game_id,
++            players: vec![],
++        });
++    }
++
++    let offenders_payload: Vec<_> = targets
++        .iter()
++        .map(|(player, _)| build_offender_payload(player, &summoner, eog.game_id))
++        .collect();
++
++    if !offenders_payload.is_empty() {
++        match remoting_client
++            .post(
++                "/lol-player-report-sender/v1/end-of-game-reports".to_string(),
++                json!({
++                    "gameId": eog.game_id,
++                    "offenders": offenders_payload,
++                }),
++            )
++            .await
++        {
++            Ok(_) => {
++                for (_, summary) in targets.iter_mut() {
++                    summary.report_sent = true;
++                }
++            }
++            Err(err) => {
++                println!("Failed to send reports for last game: {:?}", err);
++            }
++        }
++    }
++
++    let players = targets.into_iter().map(|(_, summary)| summary).collect();
++
++    let mut state_guard = state.lock().await;
++    state_guard.last_processed_game_id = Some(eog.game_id);
++
++    Ok(PostGameSummary {
++        game_id: eog.game_id,
++        players,
++    })
++}
++
++async fn fetch_friend_ids(app_client: &RESTClient) -> Result<HashSet<String>, String> {
++    let friends = app_client
++        .get("/lol-chat/v1/friends".to_string())
++        .await
++        .map_err(|err| format!("Failed to fetch friends list: {:?}", err))?;
++
++    let friends: Vec<FriendInfo> = serde_json::from_value(friends)
++        .map_err(|err| format!("Failed to parse friends list: {:?}", err))?;
++
++    Ok(friends.into_iter().map(|f| f.puuid).collect())
++}
++
++fn preferred_game_name(player: &EogPlayer) -> Option<String> {
++    player
++        .game_name
++        .clone()
++        .or_else(|| player.riot_id_game_name.clone())
++        .or_else(|| player.summoner_name.clone())
++}
++
++fn preferred_tag_line(player: &EogPlayer) -> Option<String> {
++    player
++        .tag_line
++        .clone()
++        .or_else(|| player.riot_id_tagline.clone())
++}
++
++fn build_offender_payload(
++    player: &EogPlayer,
++    reporter: &Summoner,
++    game_id: i64,
++) -> serde_json::Value {
++    json!({
++        "gameId": game_id,
++        "offenderPuuid": player.puuid,
++        "offenderSummonerId": player.summoner_id,
++        "reportedSummonerId": reporter.summoner_id,
++        "reportedSummonerName": reporter.game_name,
++        "reportedPuuid": reporter.puuid,
++        "reportedTeamId": player.team_id,
++        "reportedChampionId": player.champion_id,
++        "comment": "",
++        "reasonIds": Vec::<String>::new(),
++        "categories": REPORT_CATEGORIES,
++    })
++}
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+index b588821..9d092d3 100644
+--- a/src-tauri/src/state.rs
++++ b/src-tauri/src/state.rs
+@@ -1,4 +1,4 @@
+-use crate::{champ_select::handle_champ_select_start, AppConfig};
++use crate::{champ_select::handle_champ_select_start, post_game, AppConfig, ManagedPostGameState};
+ use shaco::rest::RESTClient;
+ use tauri::{AppHandle, Manager};
+ 
+@@ -55,6 +55,38 @@ pub async fn handle_client_state(
+                     .await;
+             }
+         }
++        "EndOfGame" => {
++            let cfg = app_handle.state::<AppConfig>();
++            let cfg = cfg.0.lock().await;
++            let should_process = cfg.auto_report_non_friends;
++            drop(cfg);
++
++            if should_process {
++                let post_game_state = app_handle.state::<ManagedPostGameState>();
++                let cloned_app_client = app_client.clone();
++                let cloned_remoting = remoting_client.clone();
++                let cloned_handle = app_handle.clone();
++
++                tauri::async_runtime::spawn(async move {
++                    match post_game::process_last_game(
++                        &post_game_state.0,
++                        &cloned_app_client,
++                        &cloned_remoting,
++                    )
++                    .await
++                    {
++                        Ok(summary) => {
++                            cloned_handle
++                                .emit_all("post_game_processed", summary)
++                                .unwrap();
++                        }
++                        Err(err) => {
++                            cloned_handle.emit_all("post_game_failed", err).unwrap();
++                        }
++                    }
++                });
++            }
++        }
+         _ => {}
+     }
+ 
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+index e7e0ddf..713dddd 100644
+--- a/src/lib/components/tool.svelte
++++ b/src/lib/components/tool.svelte
+@@ -1,5 +1,7 @@
+ <script lang="ts">
++  import { listen } from "@tauri-apps/api/event";
+   import { invoke } from "@tauri-apps/api/tauri";
++  import { onDestroy, onMount } from "svelte";
+   import { updateConfig, type Config } from "$lib/config";
+   import { fade } from "svelte/transition";
+   import RevealCount from "./reveal-count.svelte";
+@@ -8,6 +10,7 @@
+   import { Label } from "./ui/label";
+   import { Button } from "./ui/button";
+   import * as Select from "$lib/components/ui/select";
++  import type { PostGameSummary } from "$lib/post-game";
+ 
+   export let config: Config | null = null;
+   export let state = "Unknown";
+@@ -15,6 +18,11 @@
+   export let connected = false;
+ 
+   let lastSecondDodgeEnabled = false;
++  let processingLastGame = false;
++  let postGameSummary: PostGameSummary | null = null;
++  let postGameError: string | null = null;
++  let unlistenProcessed: (() => void) | null = null;
++  let unlistenFailed: (() => void) | null = null;
+   $: if (state !== "ChampSelect" && lastSecondDodgeEnabled) {
+     // lobby is prob dodged or started, can reset state now
+     lastSecondDodgeEnabled = false;
+@@ -38,6 +46,49 @@
+       value: "tracker",
+     },
+   ];
++
++  async function handleProcessLastGame() {
++    processingLastGame = true;
++    postGameError = null;
++    try {
++      postGameSummary = await invoke<PostGameSummary>("process_last_game");
++    } catch (error) {
++      postGameSummary = null;
++      if (typeof error === "string") {
++        postGameError = error;
++      } else if (error && typeof error === "object" && "message" in error) {
++        postGameError = String((error as { message?: unknown }).message);
++      } else {
++        postGameError = "Failed to process last game.";
++      }
++    } finally {
++      processingLastGame = false;
++    }
++  }
++
++  function setPostGameSummary(summary: PostGameSummary) {
++    postGameSummary = summary;
++    postGameError = null;
++  }
++
++  onMount(async () => {
++    unlistenProcessed = await listen<PostGameSummary>(
++      "post_game_processed",
++      (event) => {
++        setPostGameSummary(event.payload);
++      }
++    );
++
++    unlistenFailed = await listen<string>("post_game_failed", (event) => {
++      postGameSummary = null;
++      postGameError = event.payload;
++    });
++  });
++
++  onDestroy(() => {
++    unlistenProcessed?.();
++    unlistenFailed?.();
++  });
+ </script>
+ 
+ <div class="flex flex-col gap-2">
+@@ -93,6 +144,18 @@
+         />
+         <Label for="auto-accept">Auto Accept</Label>
+       </div>
++      <div class="flex items-center space-x-2">
++        <Switch
++          checked={config?.autoReportNonFriends}
++          id="auto-report-non-friends"
++          onCheckedChange={(v) => {
++            if (!config) return;
++            config.autoReportNonFriends = v;
++            updateConfig(config);
++          }}
++        />
++        <Label for="auto-report-non-friends">Auto Report Non-Friends</Label>
++      </div>
+     </div>
+   </div>
+   <div class="grid grid-cols-2 text-sm">
+@@ -107,6 +170,69 @@
+       </div>
+     </div>
+   </div>
++  <div class="flex flex-col gap-2">
++    <Button
++      class="w-full md:w-[220px]"
++      size="sm"
++      disabled={!connected || processingLastGame}
++      on:click={handleProcessLastGame}
++    >
++      {#if processingLastGame}
++        Processing Last Game...
++      {:else}
++        Process Last Game
++      {/if}
++    </Button>
++    {#if postGameSummary}
++      <div class="rounded-md border p-2 text-xs bg-primary-foreground">
++        <div class="font-medium">Processed Game {postGameSummary.gameId}</div>
++        {#if postGameSummary.players.length > 0}
++          <div class="mt-2 flex flex-col gap-2">
++            {#each postGameSummary.players as player}
++              <div class="flex justify-between gap-4 rounded border bg-secondary/30 p-2">
++                <div class="flex flex-col gap-1">
++                  <div class="font-medium">
++                    {player.gameName ?? player.summonerName ?? player.puuid}
++                    {#if player.tagLine}
++                      #{player.tagLine}
++                    {/if}
++                  </div>
++                  {#if player.summonerName && player.summonerName !== player.gameName}
++                    <div class="text-muted-foreground">
++                      Summoner: {player.summonerName}
++                    </div>
++                  {/if}
++                </div>
++                <div class="flex flex-col items-end gap-1 text-[11px] text-muted-foreground">
++                  <span class="text-right">
++                    Categories:
++                    <span class="text-foreground">
++                      {player.categories.join(", ")}
++                    </span>
++                  </span>
++                  <span>
++                    Report:
++                    <span class={player.reportSent ? "text-foreground" : "text-destructive"}>
++                      {player.reportSent ? "Sent" : "Failed"}
++                    </span>
++                  </span>
++                </div>
++              </div>
++            {/each}
++          </div>
++        {:else}
++          <div class="mt-1 text-muted-foreground">
++            No non-friends found to process.
++          </div>
++        {/if}
++      </div>
++    {/if}
++    {#if postGameError}
++      <div class="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
++        {postGameError}
++      </div>
++    {/if}
++  </div>
+   {#if state === "ChampSelect"}
+     <div in:fade class="flex flex-col gap-5 w-full">
+       {#if champSelect}
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+index dea3460..1301a6b 100644
+--- a/src/lib/config.ts
++++ b/src/lib/config.ts
+@@ -4,7 +4,8 @@ export interface Config {
+     autoOpen: boolean;
+     autoAccept: boolean;
+     acceptDelay: number;
+-    multiProvider: string
++    multiProvider: string;
++    autoReportNonFriends: boolean;
+ }
+ 
+ export async function updateConfig(config: Config) {
+diff --git a/src/lib/post-game.ts b/src/lib/post-game.ts
+new file mode 100644
+index 0000000..bd89763
+--- /dev/null
++++ b/src/lib/post-game.ts
+@@ -0,0 +1,14 @@
++export interface PlayerActionSummary {
++  puuid: string;
++  summonerId: number;
++  gameName: string | null;
++  tagLine: string | null;
++  summonerName: string | null;
++  reportSent: boolean;
++  categories: string[];
++}
++
++export interface PostGameSummary {
++  gameId: number;
++  players: PlayerActionSummary[];
++}

@@ -1,0 +1,512 @@
+diff --git a/src-tauri/src/end_of_game.rs b/src-tauri/src/end_of_game.rs
+new file mode 100644
+index 0000000..0f74242
+--- /dev/null
++++ b/src-tauri/src/end_of_game.rs
+@@ -0,0 +1,267 @@
++use crate::{Config, ManagedEndOfGameState};
++use reqwest::StatusCode;
++use serde::Serialize;
++use shaco::rest::RESTClient;
++use std::collections::HashSet;
++use tauri::{AppHandle, Manager};
++
++const REPORT_CATEGORIES: [&str; 7] = [
++    "NEGATIVE_ATTITUDE",
++    "VERBAL_ABUSE",
++    "LEAVING_AFK",
++    "ASSISTING_ENEMY_TEAM",
++    "HATE_SPEECH",
++    "THIRD_PARTY_TOOLS",
++    "INAPPROPRIATE_NAME",
++];
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct ReportSummary {
++    game_id: u64,
++    outcomes: Vec<ReportOutcome>,
++}
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct ReportOutcome {
++    summoner_name: String,
++    champion_name: String,
++    status: String,
++    message: Option<String>,
++}
++
++#[derive(Serialize)]
++#[serde(rename_all = "camelCase")]
++struct ReportPayload {
++    game_id: u64,
++    categories: Vec<&'static str>,
++    offender_summoner_id: u64,
++    offender_puuid: String,
++}
++
++pub async fn handle_end_of_game(
++    remoting_client: &RESTClient,
++    config: &Config,
++    app_handle: &AppHandle,
++) {
++    if !config.auto_report {
++        return;
++    }
++
++    let eog_value = match remoting_client
++        .get("/lol-end-of-game/v1/eog-stats-block".to_string())
++        .await
++    {
++        Ok(value) => value,
++        Err(err) => {
++            println!("Failed to fetch end-of-game stats: {err}");
++            return;
++        }
++    };
++
++    let game_id = match parse_id(eog_value.get("gameId")) {
++        Some(id) => id,
++        None => return,
++    };
++
++    let eog_state = app_handle.state::<ManagedEndOfGameState>();
++    {
++        let mut state = eog_state.0.lock().await;
++        if state.last_game_id == Some(game_id) {
++            return;
++        }
++        state.last_game_id = Some(game_id);
++    }
++
++    let local_player_id = eog_value
++        .get("localPlayer")
++        .and_then(|lp| parse_id(lp.get("summonerId")));
++
++    let friend_ids = load_friend_ids(remoting_client).await;
++
++    let mut outcomes = Vec::new();
++
++    if let Some(teams) = eog_value.get("teams").and_then(|v| v.as_array()) {
++        for team in teams {
++            if let Some(players) = team.get("players").and_then(|v| v.as_array()) {
++                for player in players {
++                    if let Some(outcome) = handle_player(
++                        remoting_client,
++                        player,
++                        game_id,
++                        local_player_id,
++                        &friend_ids,
++                    )
++                    .await
++                    {
++                        outcomes.push(outcome);
++                    }
++                }
++            }
++        }
++    }
++
++    if outcomes.is_empty() {
++        return;
++    }
++
++    let summary = ReportSummary { game_id, outcomes };
++    if let Err(err) = app_handle.emit_all("end_of_game_processed", &summary) {
++        println!("Failed to emit end_of_game_processed event: {err}");
++    }
++}
++
++async fn load_friend_ids(client: &RESTClient) -> HashSet<u64> {
++    let mut ids = HashSet::new();
++
++    match client.get("/lol-chat/v1/friends".to_string()).await {
++        Ok(value) => {
++            if let Some(friends) = value.as_array() {
++                for friend in friends {
++                    if let Some(id) = parse_id(friend.get("summonerId")) {
++                        ids.insert(id);
++                    }
++                }
++            }
++        }
++        Err(err) => {
++            println!("Failed to load friends list: {err}");
++        }
++    }
++
++    ids
++}
++
++async fn handle_player(
++    remoting_client: &RESTClient,
++    player: &serde_json::Value,
++    game_id: u64,
++    local_player_id: Option<u64>,
++    friends: &HashSet<u64>,
++) -> Option<ReportOutcome> {
++    let summoner_name = player
++        .get("summonerName")
++        .and_then(|v| v.as_str())
++        .unwrap_or("Unknown")
++        .to_string();
++    let champion_name = player
++        .get("championName")
++        .and_then(|v| v.as_str())
++        .unwrap_or("?")
++        .to_string();
++
++    let Some(summoner_id) = parse_id(player.get("summonerId")) else {
++        println!(
++            "{} ({}) has no summoner id, skipping",
++            summoner_name, champion_name
++        );
++        return Some(ReportOutcome {
++            summoner_name,
++            champion_name,
++            status: "skipped".to_string(),
++            message: Some("Missing summoner id".to_string()),
++        });
++    };
++
++    if local_player_id == Some(summoner_id) {
++        println!(
++            "{} ({}) is the current account, ignoring",
++            summoner_name, champion_name
++        );
++        return Some(ReportOutcome {
++            summoner_name,
++            champion_name,
++            status: "skipped".to_string(),
++            message: Some("Local player".to_string()),
++        });
++    }
++
++    if friends.contains(&summoner_id) {
++        println!(
++            "{} ({}) is a friend, ignoring",
++            summoner_name, champion_name
++        );
++        return Some(ReportOutcome {
++            summoner_name,
++            champion_name,
++            status: "skipped".to_string(),
++            message: Some("Friend detected".to_string()),
++        });
++    }
++
++    let Some(puuid) = player.get("puuid").and_then(|v| v.as_str()) else {
++        println!(
++            "{} ({}) has no PUUID, skipping",
++            summoner_name, champion_name
++        );
++        return Some(ReportOutcome {
++            summoner_name,
++            champion_name,
++            status: "skipped".to_string(),
++            message: Some("Missing PUUID".to_string()),
++        });
++    };
++
++    let payload = ReportPayload {
++        game_id,
++        categories: REPORT_CATEGORIES.to_vec(),
++        offender_summoner_id: summoner_id,
++        offender_puuid: puuid.to_string(),
++    };
++
++    let res = remoting_client
++        .post_status(
++            "/lol-player-report-sender/v1/end-of-game-reports".to_string(),
++            &payload,
++        )
++        .await;
++
++    match res {
++        Ok(status) if status == StatusCode::NO_CONTENT || status.is_success() => {
++            println!("{} ({}) has been reported", summoner_name, champion_name);
++            Some(ReportOutcome {
++                summoner_name,
++                champion_name,
++                status: "reported".to_string(),
++                message: None,
++            })
++        }
++        Ok(status) => {
++            println!(
++                "Failed to report {} ({}): status {}",
++                summoner_name, champion_name, status
++            );
++            Some(ReportOutcome {
++                summoner_name,
++                champion_name,
++                status: "failed".to_string(),
++                message: Some(format!("Unexpected status: {status}")),
++            })
++        }
++        Err(err) => {
++            println!(
++                "Failed to report {} ({}): {}",
++                summoner_name, champion_name, err
++            );
++            Some(ReportOutcome {
++                summoner_name,
++                champion_name,
++                status: "failed".to_string(),
++                message: Some(format!("Request error: {err}")),
++            })
++        }
++    }
++}
++
++fn parse_id(value: Option<&serde_json::Value>) -> Option<u64> {
++    value.and_then(|v| {
++        if let Some(id) = v.as_u64() {
++            Some(id)
++        } else if let Some(id_str) = v.as_str() {
++            id_str.parse().ok()
++        } else {
++            None
++        }
++    })
++}
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+index a35575a..0bd784c 100644
+--- a/src-tauri/src/main.rs
++++ b/src-tauri/src/main.rs
+@@ -4,6 +4,7 @@
+ mod analytics;
+ mod champ_select;
+ mod commands;
++mod end_of_game;
+ mod lobby;
+ mod region;
+ mod state;
+@@ -40,6 +41,8 @@ pub struct LCUState {
+ 
+ struct ManagedDodgeState(Mutex<DodgeState>);
+ 
++struct ManagedEndOfGameState(Mutex<EndOfGameState>);
++
+ pub struct DodgeState {
+     pub last_dodge: Option<u64>,
+     pub enabled: Option<u64>,
+@@ -52,11 +55,17 @@ struct AppConfig(Mutex<Config>);
+ struct Config {
+     pub auto_open: bool,
+     pub auto_accept: bool,
++    #[serde(default)]
++    pub auto_report: bool,
+     pub accept_delay: u32,
+     #[serde(default = "default_provider")]
+     pub multi_provider: String,
+ }
+ 
++pub struct EndOfGameState {
++    pub last_game_id: Option<u64>,
++}
++
+ fn default_provider() -> String {
+     "opgg".to_string()
+ }
+@@ -71,6 +80,9 @@ fn main() {
+             last_dodge: None,
+             enabled: None,
+         })))
++        .manage(ManagedEndOfGameState(Mutex::new(EndOfGameState {
++            last_game_id: None,
++        })))
+         .setup(|app| {
+             let app_handle = app.handle();
+             let cfg_folder = app.path_resolver().app_config_dir().unwrap();
+@@ -83,6 +95,7 @@ fn main() {
+                 let cfg = Config {
+                     auto_open: true,
+                     auto_accept: false,
++                    auto_report: false,
+                     accept_delay: 2000,
+                     multi_provider: "opgg".to_string(),
+                 };
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+index b588821..47b63fc 100644
+--- a/src-tauri/src/state.rs
++++ b/src-tauri/src/state.rs
+@@ -1,4 +1,4 @@
+-use crate::{champ_select::handle_champ_select_start, AppConfig};
++use crate::{champ_select::handle_champ_select_start, end_of_game::handle_end_of_game, AppConfig};
+ use shaco::rest::RESTClient;
+ use tauri::{AppHandle, Manager};
+ 
+@@ -55,6 +55,19 @@ pub async fn handle_client_state(
+                     .await;
+             }
+         }
++        "PreEndOfGame" | "EndOfGame" => {
++            let cloned_app_handle = app_handle.clone();
++            let cloned_remoting = remoting_client.clone();
++
++            tauri::async_runtime::spawn(async move {
++                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
++
++                let cfg_state = cloned_app_handle.state::<AppConfig>();
++                let config = cfg_state.0.lock().await.clone();
++
++                handle_end_of_game(&cloned_remoting, &config, &cloned_app_handle).await;
++            });
++        }
+         _ => {}
+     }
+ 
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+index e7e0ddf..d0df995 100644
+--- a/src/lib/components/tool.svelte
++++ b/src/lib/components/tool.svelte
+@@ -4,6 +4,7 @@
+   import { fade } from "svelte/transition";
+   import RevealCount from "./reveal-count.svelte";
+   import type { ChampSelect } from "$lib/champ_select";
++  import type { EndOfGameSummary } from "$lib/end_of_game";
+   import { Switch } from "./ui/switch";
+   import { Label } from "./ui/label";
+   import { Button } from "./ui/button";
+@@ -13,6 +14,7 @@
+   export let state = "Unknown";
+   export let champSelect: ChampSelect | null = null;
+   export let connected = false;
++  export let endOfGameSummary: EndOfGameSummary | null = null;
+ 
+   let lastSecondDodgeEnabled = false;
+   $: if (state !== "ChampSelect" && lastSecondDodgeEnabled) {
+@@ -93,6 +95,18 @@
+         />
+         <Label for="auto-accept">Auto Accept</Label>
+       </div>
++      <div class="flex items-center space-x-2">
++        <Switch
++          checked={config?.autoReport}
++          id="auto-report"
++          onCheckedChange={(v) => {
++            if (!config) return;
++            config.autoReport = v;
++            updateConfig(config);
++          }}
++        />
++        <Label for="auto-report">Auto Report</Label>
++      </div>
+     </div>
+   </div>
+   <div class="grid grid-cols-2 text-sm">
+@@ -107,6 +121,35 @@
+       </div>
+     </div>
+   </div>
++  {#if endOfGameSummary}
++    <div class="border rounded-md p-2 text-xs flex flex-col gap-2">
++      <div class="font-medium text-sm">Last Auto Reports</div>
++      {#if endOfGameSummary.outcomes.length === 0}
++        <div class="text-muted-foreground">No players required reporting.</div>
++      {:else}
++        {#each endOfGameSummary.outcomes as outcome}
++          <div class="flex flex-col gap-1">
++            <div class="flex justify-between gap-2">
++              <span>{outcome.summonerName} ({outcome.championName})</span>
++              <span
++                class="capitalize"
++                class:text-green-600={outcome.status === "reported"}
++                class:text-amber-600={outcome.status === "skipped"}
++                class:text-red-600={outcome.status === "failed"}
++              >
++                {outcome.status}
++              </span>
++            </div>
++            {#if outcome.message}
++              <div class="text-[10px] text-muted-foreground">
++                {outcome.message}
++              </div>
++            {/if}
++          </div>
++        {/each}
++      {/if}
++    </div>
++  {/if}
+   {#if state === "ChampSelect"}
+     <div in:fade class="flex flex-col gap-5 w-full">
+       {#if champSelect}
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+index dea3460..64fe983 100644
+--- a/src/lib/config.ts
++++ b/src/lib/config.ts
+@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/tauri";
+ export interface Config {
+     autoOpen: boolean;
+     autoAccept: boolean;
++    autoReport: boolean;
+     acceptDelay: number;
+     multiProvider: string
+ }
+diff --git a/src/lib/end_of_game.ts b/src/lib/end_of_game.ts
+new file mode 100644
+index 0000000..42d0023
+--- /dev/null
++++ b/src/lib/end_of_game.ts
+@@ -0,0 +1,13 @@
++export type ReportStatus = "reported" | "skipped" | "failed";
++
++export interface ReportOutcome {
++    summonerName: string;
++    championName: string;
++    status: ReportStatus;
++    message?: string | null;
++}
++
++export interface EndOfGameSummary {
++    gameId: number;
++    outcomes: ReportOutcome[];
++}
+diff --git a/src/reveal.svelte b/src/reveal.svelte
+index 2704ef6..d1890d1 100644
+--- a/src/reveal.svelte
++++ b/src/reveal.svelte
+@@ -5,6 +5,7 @@
+   import { type Config } from "$lib/config";
+   import "@fontsource-variable/inter";
+   import type { ChampSelect } from "$lib/champ_select";
++  import type { EndOfGameSummary } from "$lib/end_of_game";
+   import Tool from "$lib/components/tool.svelte";
+   import Navbar from "$lib/components/navbar.svelte";
+   import Footer from "$lib/components/footer.svelte";
+@@ -15,6 +16,7 @@
+   let connected = false;
+   let champSelect: ChampSelect | null = null;
+   let config: Config | null = null;
++  let endOfGameSummary: EndOfGameSummary | null = null;
+   let updateStatus: "Checking" | "Installing" | "Restarting" | "UpToDate" =
+     "Checking";
+ 
+@@ -36,6 +38,10 @@
+       champSelect = event.payload;
+     });
+ 
++    await listen<EndOfGameSummary>("end_of_game_processed", (event) => {
++      endOfGameSummary = event.payload;
++    });
++
+     invoke<Config>("app_ready").then((c) => {
+       config = c;
+     });
+@@ -71,7 +77,13 @@
+     {:else if updateStatus === "Restarting"}
+       <div>Restarting...</div>
+     {:else if updateStatus === "UpToDate"}
+-      <Tool {config} {state} {champSelect} {connected} />
++      <Tool
++        {config}
++        {state}
++        {champSelect}
++        {connected}
++        {endOfGameSummary}
++      />
+     {/if}
+   </div>
+   <Footer {connected} />

@@ -1,0 +1,123 @@
+==== analysis/pr_diffs/pr1.diff ====
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/reporting.rs b/src-tauri/src/reporting.rs
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+==== analysis/pr_diffs/pr10.diff ====
+diff --git a/src-tauri/src/end_game.rs b/src-tauri/src/end_game.rs
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+==== analysis/pr_diffs/pr11.diff ====
+diff --git a/src-tauri/src/end_of_game.rs b/src-tauri/src/end_of_game.rs
+==== analysis/pr_diffs/pr12.diff ====
+diff --git a/PROMPT_SUGGESTION.md b/PROMPT_SUGGESTION.md
+diff --git a/agents.md b/agents.md
+diff --git a/docs/auto_report_plan.md b/docs/auto_report_plan.md
+diff --git a/src-tauri/src/end_of_game.rs b/src-tauri/src/end_of_game.rs
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+diff --git a/src/lib/end_of_game.ts b/src/lib/end_of_game.ts
+diff --git a/src/reveal.svelte b/src/reveal.svelte
+==== analysis/pr_diffs/pr13.diff ====
+diff --git a/PROMPT_SUGGESTION.md b/PROMPT_SUGGESTION.md
+diff --git a/agents.md b/agents.md
+diff --git a/docs/auto_report_plan.md b/docs/auto_report_plan.md
+diff --git a/src-tauri/src/end_of_game.rs b/src-tauri/src/end_of_game.rs
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+diff --git a/src/lib/end_of_game.ts b/src/lib/end_of_game.ts
+diff --git a/src/reveal.svelte b/src/reveal.svelte
+==== analysis/pr_diffs/pr14.diff ====
+diff --git a/docs/auto_features_data_flow.md b/docs/auto_features_data_flow.md
+diff --git a/src-tauri/src/end_game.rs b/src-tauri/src/end_game.rs
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+==== analysis/pr_diffs/pr15.diff ====
+diff --git a/AGENTS.md b/AGENTS.md
+diff --git a/src-tauri/Cargo.lock b/src-tauri/Cargo.lock
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+diff --git a/src-tauri/src/analytics.rs b/src-tauri/src/analytics.rs
+diff --git a/src-tauri/src/champ_select.rs b/src-tauri/src/champ_select.rs
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+diff --git a/src/lib/components/reveal-count.svelte b/src/lib/components/reveal-count.svelte
+==== analysis/pr_diffs/pr16.diff ====
+diff --git a/src-tauri/src/champ_select.rs b/src-tauri/src/champ_select.rs
+diff --git a/src-tauri/src/end_game.rs b/src-tauri/src/end_game.rs
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+diff --git a/src-tauri/src/summoner.rs b/src-tauri/src/summoner.rs
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+==== analysis/pr_diffs/pr17.diff ====
+diff --git a/src-tauri/src/analytics.rs b/src-tauri/src/analytics.rs
+diff --git a/src-tauri/src/champ_select.rs b/src-tauri/src/champ_select.rs
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src/lib/components/reveal-count.svelte b/src/lib/components/reveal-count.svelte
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+==== analysis/pr_diffs/pr2.diff ====
+diff --git a/src-tauri/src/commands.rs b/src-tauri/src/commands.rs
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/post_game.rs b/src-tauri/src/post_game.rs
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+diff --git a/src/lib/post-game.ts b/src/lib/post-game.ts
+==== analysis/pr_diffs/pr3.diff ====
+diff --git a/src-tauri/src/commands.rs b/src-tauri/src/commands.rs
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/post_game.rs b/src-tauri/src/post_game.rs
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+diff --git a/src/lib/post-game.ts b/src/lib/post-game.ts
+==== analysis/pr_diffs/pr4.diff ====
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/reports.rs b/src-tauri/src/reports.rs
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+==== analysis/pr_diffs/pr5.diff ====
+diff --git a/src-tauri/src/end_of_game.rs b/src-tauri/src/end_of_game.rs
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+diff --git a/src/lib/end_of_game.ts b/src/lib/end_of_game.ts
+diff --git a/src/reveal.svelte b/src/reveal.svelte
+==== analysis/pr_diffs/pr6.diff ====
+diff --git a/docs/auto-open-auto-accept.md b/docs/auto-open-auto-accept.md
+diff --git a/docs/auto-report-approaches.md b/docs/auto-report-approaches.md
+diff --git a/docs/auto-report-state-flow.md b/docs/auto-report-state-flow.md
+diff --git a/docs/auto-report-vs-csharp.md b/docs/auto-report-vs-csharp.md
+diff --git a/src-tauri/src/end_of_game.rs b/src-tauri/src/end_of_game.rs
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+==== analysis/pr_diffs/pr7.diff ====
+diff --git a/PROMPT_SUGGESTION.md b/PROMPT_SUGGESTION.md
+diff --git a/agents.md b/agents.md
+==== analysis/pr_diffs/pr8.diff ====
+diff --git a/PROMPT_SUGGESTION.md b/PROMPT_SUGGESTION.md
+diff --git a/agents.md b/agents.md
+diff --git a/docs/auto_report_plan.md b/docs/auto_report_plan.md
+==== analysis/pr_diffs/pr9.diff ====
+diff --git a/PROMPT_SUGGESTION.md b/PROMPT_SUGGESTION.md
+diff --git a/agents.md b/agents.md
+diff --git a/docs/auto_report_plan.md b/docs/auto_report_plan.md
+diff --git a/src-tauri/src/end_of_game.rs b/src-tauri/src/end_of_game.rs
+diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+diff --git a/src/lib/components/tool.svelte b/src/lib/components/tool.svelte
+diff --git a/src/lib/config.ts b/src/lib/config.ts
+diff --git a/src/lib/end_of_game.ts b/src/lib/end_of_game.ts
+diff --git a/src/reveal.svelte b/src/reveal.svelte
