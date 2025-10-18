@@ -1,4 +1,4 @@
-use crate::{champ_select::handle_champ_select_start, AppConfig};
+use crate::{champ_select::handle_champ_select_start, end_game, AppConfig};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -54,6 +54,14 @@ pub async fn handle_client_state(
                     )
                     .await;
             }
+        }
+        "EndOfGame" => {
+            let cloned_app_handle = app_handle.clone();
+            let cloned_remoting = remoting_client.clone();
+
+            tauri::async_runtime::spawn(async move {
+                end_game::handle_end_of_game(&cloned_app_handle, &cloned_remoting).await;
+            });
         }
         _ => {}
     }
