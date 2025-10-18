@@ -4,6 +4,7 @@
 mod analytics;
 mod champ_select;
 mod commands;
+mod end_game;
 mod lobby;
 mod region;
 mod state;
@@ -53,8 +54,14 @@ struct Config {
     pub auto_open: bool,
     pub auto_accept: bool,
     pub accept_delay: u32,
+    #[serde(default = "default_auto_report")]
+    pub auto_report: bool,
     #[serde(default = "default_provider")]
     pub multi_provider: String,
+}
+
+fn default_auto_report() -> bool {
+    false
 }
 
 fn default_provider() -> String {
@@ -84,6 +91,7 @@ fn main() {
                     auto_open: true,
                     auto_accept: false,
                     accept_delay: 2000,
+                    auto_report: false,
                     multi_provider: "opgg".to_string(),
                 };
 
