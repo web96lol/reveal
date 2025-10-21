@@ -1,4 +1,4 @@
-use crate::{champ_select::handle_champ_select_start, AppConfig};
+use crate::{champ_select::handle_champ_select_start, end_game::handle_end_of_game, AppConfig};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -23,20 +23,13 @@ pub async fn handle_client_state(
         "ChampSelect" => {
             let cloned_app_handle = app_handle.clone();
             let cloned_app_client = app_client.clone();
-            let cloned_remoting = remoting_client.clone();
 
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
                 let cfg = cloned_app_handle.state::<AppConfig>();
                 let cfg = cfg.0.lock().await;
-                handle_champ_select_start(
-                    &cloned_app_client,
-                    &cloned_remoting,
-                    &cfg,
-                    &cloned_app_handle,
-                )
-                .await;
+                handle_champ_select_start(&cloned_app_client, &cfg, &cloned_app_handle).await;
             });
         }
         "ReadyCheck" => {
@@ -53,6 +46,18 @@ pub async fn handle_client_state(
                         serde_json::json!({}),
                     )
                     .await;
+            }
+        }
+        "PreEndOfGame" | "EndOfGame" => {
+            let cfg = app_handle.state::<AppConfig>();
+            let should_report = cfg.0.lock().await.auto_report;
+
+            if should_report {
+                let cloned_app_client = app_client.clone();
+
+                tauri::async_runtime::spawn(async move {
+                    handle_end_of_game(&cloned_app_client).await;
+                });
             }
         }
         _ => {}

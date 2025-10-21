@@ -1,24 +1,15 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/tauri";
   import { updateConfig, type Config } from "$lib/config";
   import { fade } from "svelte/transition";
-  import RevealCount from "./reveal-count.svelte";
   import type { ChampSelect } from "$lib/champ_select";
   import { Switch } from "./ui/switch";
   import { Label } from "./ui/label";
-  import { Button } from "./ui/button";
   import * as Select from "$lib/components/ui/select";
 
   export let config: Config | null = null;
   export let state = "Unknown";
   export let champSelect: ChampSelect | null = null;
   export let connected = false;
-
-  let lastSecondDodgeEnabled = false;
-  $: if (state !== "ChampSelect" && lastSecondDodgeEnabled) {
-    // lobby is prob dodged or started, can reset state now
-    lastSecondDodgeEnabled = false;
-  }
 
   const multiProviders = [
     {
@@ -93,19 +84,23 @@
         />
         <Label for="auto-accept">Auto Accept</Label>
       </div>
-    </div>
-  </div>
-  <div class="grid grid-cols-2 text-sm">
-    <div class="flex flex-col">
-      <div class="text-muted-foreground text-xs">State</div>
-      <div>{state}</div>
-    </div>
-    <div class="flex flex-col">
-      <div class="text-muted-foreground text-xs">Revealed Champ Selects</div>
-      <div>
-        <RevealCount />
+      <div class="flex items-center space-x-2">
+        <Switch
+          checked={config?.autoReport}
+          id="auto-report"
+          onCheckedChange={(v) => {
+            if (!config) return;
+            config.autoReport = v;
+            updateConfig(config);
+          }}
+        />
+        <Label for="auto-report">Auto Report</Label>
       </div>
     </div>
+  </div>
+  <div class="text-sm">
+    <div class="text-muted-foreground text-xs">State</div>
+    <div>{state}</div>
   </div>
   {#if state === "ChampSelect"}
     <div in:fade class="flex flex-col gap-5 w-full">
@@ -126,13 +121,6 @@
             </div>
           {/each}
         </div>
-        <Button
-          class="h-9 absolute right-4 w-[180px] bottom-[52px]"
-          size="sm"
-          on:click={() => invoke("open_opgg_link")}
-        >
-          Open Multi Link
-        </Button>
       {:else}
         <div class="grid grid-cols-2 items-start gap-y-1 gap-x-2 text-sm">
           {#each new Array(5) as _}
@@ -141,13 +129,6 @@
             />
           {/each}
         </div>
-        <Button
-          class="h-9 hover:cursor-not-allowed absolute right-4 w-[180px] bottom-[52px]"
-          size="sm"
-          on:click={() => invoke("open_opgg_link")}
-        >
-          Open Multi Link
-        </Button>
       {/if}
     </div>
   {:else if state === "InProgress"}
