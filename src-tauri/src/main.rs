@@ -173,7 +173,6 @@ async fn handle_ws_message(
             let client_state = msg.data.to_string().replace('\"', "");
             state::handle_client_state(client_state, app_handle, remoting_client, app_client).await;
         }
-        "OnJsonApiEvent_lol-champ-select_v1_session" => {}
         _ => {
             println!("Unhandled Message: {}", msg_type);
         }
