@@ -61,7 +61,7 @@ pub async fn handle_end_of_game(
     };
 
     let local_player = response.get("localPlayer").and_then(|p| {
-        let summoner_id = p.get("summonerId").and_then(|v| v.as_u64())?;
+        let summoner_id = p.get("summonerId").and_then(parse_u64_from_value)?;
         let puuid = p.get("puuid").and_then(|v| v.as_str())?.to_string();
         Some((summoner_id, puuid))
     });
@@ -78,7 +78,8 @@ pub async fn handle_end_of_game(
         for team in teams {
             if let Some(players) = team.get("players").and_then(|p| p.as_array()) {
                 for player in players {
-                    let Some(player_id) = player.get("summonerId").and_then(|v| v.as_u64()) else {
+                    let Some(player_id) = player.get("summonerId").and_then(parse_u64_from_value)
+                    else {
                         continue;
                     };
 
@@ -168,11 +169,19 @@ async fn fetch_friend_ids(app_client: &RESTClient) -> Result<HashSet<u64>, Strin
     let mut ids = HashSet::new();
     if let Some(arr) = response.as_array() {
         for friend in arr {
-            if let Some(id) = friend.get("summonerId").and_then(|v| v.as_u64()) {
+            if let Some(id) = friend.get("summonerId").and_then(parse_u64_from_value) {
                 ids.insert(id);
             }
         }
     }
 
     Ok(ids)
+}
+
+fn parse_u64_from_value(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(num) => num.as_u64(),
+        Value::String(str_num) => str_num.parse().ok(),
+        _ => None,
+    }
 }
