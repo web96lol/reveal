@@ -1,4 +1,9 @@
-use crate::{champ_select::handle_champ_select_start, end_game, AppConfig, LCU};
+use crate::{
+    champ_select::{
+        handle_champ_select_start, reset_dodge_state, set_dodge_enabled, ChampSelectSession,
+    },
+    end_game, AppConfig, LCU,
+};
 use shaco::rest::RESTClient;
 use tauri::{AppHandle, Manager};
 
@@ -19,6 +24,10 @@ pub async fn handle_client_state(
     remoting_client: &RESTClient,
     app_client: &RESTClient,
 ) {
+    if client_state != "ChampSelect" {
+        reset_dodge_state(app_handle).await;
+    }
+
     match client_state.as_str() {
         "ChampSelect" => {
             let cloned_app_handle = app_handle.clone();
@@ -37,6 +46,19 @@ pub async fn handle_client_state(
                     &cloned_app_handle,
                 )
                 .await;
+            });
+
+            let dodge_app_handle = app_handle.clone();
+            let dodge_remoting = remoting_client.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(session) = dodge_remoting
+                    .get("/lol-champ-select/v1/session".to_string())
+                    .await
+                    .ok()
+                    .and_then(|v| serde_json::from_value::<ChampSelectSession>(v).ok())
+                {
+                    set_dodge_enabled(&dodge_app_handle, session.game_id).await;
+                }
             });
         }
         "PreEndOfGame" => {

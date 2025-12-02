@@ -44,13 +44,17 @@
       "csp": null
     },
     "macOSPrivateApi": true,
+    "systemTray": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true
+    },
     "windows": [
       {
         "fullscreen": false,
         "resizable": false,
         "title": "reveal",
-        "width": 400,
-        "height": 325,
+        "width": 450,
+        "height": 375,
         "decorations": false,
         "transparent": true
       }

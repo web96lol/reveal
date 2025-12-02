@@ -1,2 +1,7 @@
 ignoredBuiltDependencies:
   - inotify
+  - optipng-bin
+  - pngquant-bin
+  - sharp
+  - tauri
+  - zopflipng-bin

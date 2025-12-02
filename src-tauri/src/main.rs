@@ -9,7 +9,11 @@ mod region;
 mod state;
 mod utils;
 
-use commands::{app_ready, get_config, get_lcu_info, get_lcu_state, set_config};
+use champ_select::{handle_champ_select_ws_event, reset_dodge_state, ChampSelectSession};
+use commands::{
+    app_ready, dodge, enable_dodge, get_config, get_lcu_info, get_lcu_state, open_opgg_link,
+    set_config,
+};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use shaco::model::ws::LcuEvent;
@@ -17,8 +21,12 @@ use shaco::rest::RESTClient;
 use shaco::utils::process_info;
 use shaco::ws::LcuWebsocketClient;
 use shaco::{model::ws::LcuSubscriptionType::JsonApiEvent, rest::LCUClientInfo};
-use std::time::Duration;
-use tauri::{AppHandle, Manager};
+use std::{io, time::Duration};
+use tauri::{
+    async_runtime::JoinHandle, AppHandle, CustomMenuItem, Manager, SystemTray, SystemTrayEvent,
+    SystemTrayMenu, SystemTrayMenuItem, Window, WindowEvent,
+};
+use tauri_plugin_positioner::{Position, WindowExt};
 use tokio::sync::Mutex;
 
 struct LCU(Mutex<LCUState>);
@@ -30,6 +38,14 @@ pub struct LCUState {
 }
 
 pub struct AppConfig(Mutex<Config>);
+
+pub struct ManagedDodgeState(Mutex<DodgeState>);
+
+pub struct DodgeState {
+    pub last_dodge: Option<u64>,
+    pub enabled: Option<u64>,
+    pub timer: Option<JoinHandle<()>>,
+}
 
 pub struct ReportState(pub Mutex<ReportCache>);
 
@@ -54,7 +70,23 @@ fn default_provider() -> String {
     "opgg".to_string()
 }
 
+const MAIN_WINDOW_LABEL: &str = "main";
+const MENU_ID_OPEN: &str = "open";
+const MENU_ID_AUTO_REPORT: &str = "auto_report";
+const MENU_ID_AUTO_OPEN: &str = "auto_open";
+const MENU_ID_AUTO_ACCEPT: &str = "auto_accept";
+const MENU_ID_QUIT: &str = "quit";
+
+#[derive(Clone, Copy)]
+enum ConfigFlag {
+    AutoReport,
+    AutoOpen,
+    AutoAccept,
+}
+
 fn main() {
+    let tray = build_system_tray();
+
     tauri::Builder::default()
         .manage(LCU(Mutex::new(LCUState {
             connected: false,
@@ -62,6 +94,37 @@ fn main() {
             last_state: None,
         })))
         .manage(ReportState(Mutex::new(ReportCache::default())))
+        .manage(ManagedDodgeState(Mutex::new(DodgeState {
+            last_dodge: None,
+            enabled: None,
+            timer: None,
+        })))
+        .plugin(tauri_plugin_positioner::init())
+        .system_tray(tray)
+        .on_window_event(|event| {
+            if let WindowEvent::CloseRequested { api, .. } = event.event() {
+                if event.window().label() == MAIN_WINDOW_LABEL {
+                    let window = event.window();
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+            }
+        })
+        .on_system_tray_event(|app, event| {
+            tauri_plugin_positioner::on_tray_event(app, &event);
+            match event {
+                SystemTrayEvent::LeftClick { .. } => toggle_main_window(app),
+                SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
+                    MENU_ID_OPEN => show_main_window_from_app(app),
+                    MENU_ID_AUTO_REPORT => toggle_config_flag(app, ConfigFlag::AutoReport),
+                    MENU_ID_AUTO_OPEN => toggle_config_flag(app, ConfigFlag::AutoOpen),
+                    MENU_ID_AUTO_ACCEPT => toggle_config_flag(app, ConfigFlag::AutoAccept),
+                    MENU_ID_QUIT => app.exit(0),
+                    _ => {}
+                },
+                _ => {}
+            }
+        })
         .setup(|app| {
             let app_handle = app.handle();
             let cfg_folder = app.path_resolver().app_config_dir().unwrap();
@@ -85,7 +148,8 @@ fn main() {
 
             let cfg_json = std::fs::read_to_string(&cfg_path).unwrap();
             let cfg: Config = serde_json::from_str(&cfg_json).unwrap();
-            app.manage(AppConfig(Mutex::new(cfg)));
+            app.manage(AppConfig(Mutex::new(cfg.clone())));
+            update_tray_menu_labels(&app_handle, &cfg);
 
             tauri::async_runtime::spawn(async move {
                 let mut connected = true;
@@ -152,6 +216,9 @@ fn main() {
                     ws.subscribe(JsonApiEvent("/lol-gameflow/v1/gameflow-phase".to_string()))
                         .await
                         .unwrap();
+                    ws.subscribe(JsonApiEvent("/lol-champ-select/v1/session".to_string()))
+                        .await
+                        .unwrap();
 
                     println!("Connected to League Client!");
 
@@ -172,7 +239,10 @@ fn main() {
             get_lcu_state,
             get_lcu_info,
             get_config,
-            set_config
+            set_config,
+            open_opgg_link,
+            dodge,
+            enable_dodge
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -191,8 +261,130 @@ async fn handle_ws_message(
             let client_state = msg.data.to_string().replace('\"', "");
             state::handle_client_state(client_state, app_handle, remoting_client, app_client).await;
         }
+        "OnJsonApiEvent_lol-champ-select_v1_session" => {
+            let champ_select = serde_json::from_value::<ChampSelectSession>(msg.data.clone());
+            if let Ok(session) = champ_select {
+                handle_champ_select_ws_event(session, app_handle, remoting_client).await;
+            } else {
+                println!("Failed to parse champ select session!, {:?}", champ_select);
+                reset_dodge_state(app_handle).await;
+            }
+        }
         _ => {
             println!("Unhandled Message: {}", msg_type);
         }
     }
+}
+
+fn build_system_tray() -> SystemTray {
+    let open_window = CustomMenuItem::new(MENU_ID_OPEN, "Open Reveal");
+    let auto_open = CustomMenuItem::new(
+        MENU_ID_AUTO_OPEN,
+        format_toggle_label("Auto Open Multi", false),
+    );
+    let auto_accept = CustomMenuItem::new(
+        MENU_ID_AUTO_ACCEPT,
+        format_toggle_label("Auto Accept", false),
+    );
+    let auto_report = CustomMenuItem::new(
+        MENU_ID_AUTO_REPORT,
+        format_toggle_label("Auto Report", false),
+    );
+    let quit = CustomMenuItem::new(MENU_ID_QUIT, "Quit");
+
+    let menu = SystemTrayMenu::new()
+        .add_item(open_window)
+        .add_native_item(SystemTrayMenuItem::Separator)
+        .add_item(auto_open)
+        .add_item(auto_accept)
+        .add_item(auto_report)
+        .add_native_item(SystemTrayMenuItem::Separator)
+        .add_item(quit);
+
+    SystemTray::new().with_menu(menu)
+}
+
+fn toggle_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_window(MAIN_WINDOW_LABEL) {
+        match window.is_visible() {
+            Ok(true) => {
+                let _ = window.hide();
+            }
+            Ok(false) | Err(_) => show_main_window(&window),
+        }
+    }
+}
+
+fn show_main_window_from_app(app: &AppHandle) {
+    if let Some(window) = app.get_window(MAIN_WINDOW_LABEL) {
+        show_main_window(&window);
+    }
+}
+
+fn show_main_window(window: &Window) {
+    let _ = window.unminimize();
+    let _ = window.move_window(Position::TrayCenter);
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+fn toggle_config_flag(app: &AppHandle, flag: ConfigFlag) {
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let cfg_state = app_handle.state::<AppConfig>();
+        let mut cfg_guard = cfg_state.0.lock().await;
+        match flag {
+            ConfigFlag::AutoReport => cfg_guard.auto_report = !cfg_guard.auto_report,
+            ConfigFlag::AutoOpen => cfg_guard.auto_open = !cfg_guard.auto_open,
+            ConfigFlag::AutoAccept => cfg_guard.auto_accept = !cfg_guard.auto_accept,
+        }
+
+        let cfg_snapshot = cfg_guard.clone();
+        drop(cfg_guard);
+
+        sync_config(&app_handle, &cfg_snapshot).await;
+    });
+}
+
+pub(crate) async fn sync_config(app: &AppHandle, cfg: &Config) {
+    if let Err(err) = persist_config(app, cfg).await {
+        eprintln!("failed to persist config: {err}");
+    }
+
+    update_tray_menu_labels(app, cfg);
+    let _ = app.emit_all("config_updated", cfg.clone());
+}
+
+async fn persist_config(app: &AppHandle, cfg: &Config) -> io::Result<()> {
+    if let Some(cfg_dir) = app.path_resolver().app_config_dir() {
+        if !cfg_dir.exists() {
+            tokio::fs::create_dir_all(&cfg_dir).await?;
+        }
+        let cfg_path = cfg_dir.join("config.json");
+        let cfg_json = serde_json::to_string(cfg).unwrap();
+        tokio::fs::write(cfg_path, cfg_json).await
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "config directory unavailable",
+        ))
+    }
+}
+
+fn update_tray_menu_labels(app: &AppHandle, cfg: &Config) {
+    let tray_handle = app.tray_handle();
+    let _ = tray_handle
+        .get_item(MENU_ID_AUTO_OPEN)
+        .set_title(format_toggle_label("Auto Open Multi", cfg.auto_open));
+    let _ = tray_handle
+        .get_item(MENU_ID_AUTO_ACCEPT)
+        .set_title(format_toggle_label("Auto Accept", cfg.auto_accept));
+    let _ = tray_handle
+        .get_item(MENU_ID_AUTO_REPORT)
+        .set_title(format_toggle_label("Auto Report", cfg.auto_report));
+}
+
+fn format_toggle_label(name: &str, value: bool) -> String {
+    let status = if value { "On" } else { "Off" };
+    format!("{name}: {status}")
 }

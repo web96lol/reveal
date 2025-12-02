@@ -1,16 +1,22 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/tauri";
   import { updateConfig, type Config } from "$lib/config";
   import { fade } from "svelte/transition";
   import type { ChampSelect } from "$lib/champ_select";
   import { Switch } from "./ui/switch";
   import { Label } from "./ui/label";
   import * as Select from "$lib/components/ui/select";
+  import { Button } from "./ui/button";
 
   export let config: Config | null = null;
   export let state = "Unknown";
   export let champSelect: ChampSelect | null = null;
   export let connected = false;
+  export let lastSecondDodgeEnabled = false;
 
+  $: if (state !== "ChampSelect" && lastSecondDodgeEnabled) {
+    lastSecondDodgeEnabled = false;
+  }
 
   const multiProviders = [
     {
@@ -107,6 +113,9 @@
   </div>
   {#if state === "ChampSelect"}
     <div in:fade class="flex flex-col gap-5 w-full">
+      {#if lastSecondDodgeEnabled}
+        <div class="text-xs text-amber-600">Last-second dodge armed</div>
+      {/if}
       {#if champSelect}
         <div class="grid grid-cols-2 items-start gap-y-1 gap-x-2 text-sm">
           {#each champSelect.participants as participant}
@@ -124,6 +133,15 @@
             </div>
           {/each}
         </div>
+        <div class="flex justify-end">
+          <Button
+            size="sm"
+            class="h-9 w-[180px]"
+            on:click={() => invoke("open_opgg_link")}
+          >
+            Open Multi Link
+          </Button>
+        </div>
       {:else}
         <div class="grid grid-cols-2 items-start gap-y-1 gap-x-2 text-sm">
           {#each new Array(5) as _}
@@ -131,6 +149,11 @@
               class="bg-primary-foreground border animate-pulse h-9 w-full rounded-md"
             />
           {/each}
+        </div>
+        <div class="flex justify-end">
+          <Button size="sm" class="h-9 w-[180px]" disabled>
+            Open Multi Link
+          </Button>
         </div>
       {/if}
     </div>

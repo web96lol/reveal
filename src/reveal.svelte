@@ -14,6 +14,7 @@
   let connected = false;
   let champSelect: ChampSelect | null = null;
   let config: Config | null = null;
+  let lastSecondDodgeEnabled = false;
   // Updater UI removed; show Tool immediately
 
   onMount(async () => {
@@ -34,6 +35,14 @@
       champSelect = event.payload;
     });
 
+    await listen<boolean>("dodge_state_update", (event) => {
+      lastSecondDodgeEnabled = event.payload;
+    });
+
+    await listen<Config>("config_updated", (event) => {
+      config = event.payload;
+    });
+
     await listen("preendofgame", () => {
       console.log("auto_report: pre-end detected");
     });
@@ -47,10 +56,16 @@
   });
 </script>
 
-<main class="h-[325px] bg-background border rounded-md">
+<main class="h-[375px] bg-background border rounded-md">
   <Navbar />
-  <div class="h-[240px] px-4 pt-1">
-    <Tool {config} {state} {champSelect} {connected} />
+  <div class="h-[290px] px-4 pt-1">
+    <Tool
+      {config}
+      {state}
+      {champSelect}
+      {connected}
+      {lastSecondDodgeEnabled}
+    />
   </div>
   <Footer {connected} />
 </main>
