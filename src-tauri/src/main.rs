@@ -109,7 +109,7 @@ fn main() {
                     auto_accept: true,
                     accept_delay: 2000,
                     multi_provider: "opgg".to_string(),
-                    auto_report: false,
+                    auto_report: true,
                 };
 
                 let cfg_json = serde_json::to_string(&cfg).unwrap();
